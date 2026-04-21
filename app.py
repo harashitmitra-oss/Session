@@ -8,7 +8,76 @@ import streamlit as st
 
 st.set_page_config(page_title="Batch Attendance Mapper", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    .main {
+        background: linear-gradient(180deg, #f8fbff 0%, #eef4ff 100%);
+    }
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 2rem;
+        max-width: 1200px;
+    }
+    .hero-card {
+        background: linear-gradient(135deg, #0f172a 0%, #1d4ed8 100%);
+        padding: 1.4rem 1.5rem;
+        border-radius: 22px;
+        color: white;
+        box-shadow: 0 10px 30px rgba(29, 78, 216, 0.20);
+        margin-bottom: 1rem;
+    }
+    .hero-title {
+        font-size: 2rem;
+        font-weight: 800;
+        margin-bottom: 0.25rem;
+    }
+    .hero-subtitle {
+        font-size: 1rem;
+        opacity: 0.92;
+    }
+    .section-card {
+        background: white;
+        border-radius: 20px;
+        padding: 1rem 1rem 0.75rem 1rem;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        margin-bottom: 1rem;
+    }
+    .batch-card {
+        background: white;
+        border-radius: 18px;
+        padding: 1rem;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        margin: 0.75rem 0 0.35rem 0;
+    }
+    .batch-title {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #0f172a;
+        margin-bottom: 0.2rem;
+    }
+    .batch-subtitle {
+        color: #475569;
+        font-size: 0.95rem;
+    }
+    div[data-testid="stMetric"] {
+        background: white;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        padding: 0.85rem;
+        border-radius: 18px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
+
+# -----------------------------
+# Helpers
+# -----------------------------
 def normalize_text(value) -> str:
     if pd.isna(value):
         return ""
@@ -30,7 +99,7 @@ def normalize_name(value) -> str:
 
 def parse_event_details(filename: str) -> Tuple[str, str]:
     """
-    Example:
+    Example filename:
     Attendees--An Exclusive AMA with Tetr Co-Founder for Students and Parents _ Tarun Gangwar--18 Apr, 2026 (1).xlsx
     """
     stem = Path(filename).stem
@@ -98,47 +167,51 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
     attendance = attendance_df.copy()
     students = students_df.copy()
 
-    attendance = attendance.rename(columns={"Name": "Name_attendance", "Email": "Email_attendance"})
-
     students_email = students[students["email_key"] != ""].drop_duplicates(subset=["email_key"])
     students_name = students[students["name_key"] != ""].drop_duplicates(subset=["name_key"])
 
+    # Email match first
     email_match = attendance.merge(
         students_email[["email_key", "Name", "Email", "UG/PG", "Batch", "Batch Label"]],
         on="email_key",
         how="left",
+        suffixes=("_attendance", "_student"),
     )
+
     email_match["match_type"] = email_match["Batch Label"].notna().map(lambda x: "Email" if x else "")
 
-    email_matched = email_match[email_match["Batch Label"].notna()].copy()
-    email_unmatched = email_match[email_match["Batch Label"].isna()].copy()
+    unmatched_email = email_match[email_match["Batch Label"].isna()].copy()
 
-    name_match = email_unmatched[["Name_attendance", "Email_attendance", "name_key", "email_key"]].merge(
+    # Name fallback only for unmatched rows
+    name_match = unmatched_email[["Name_attendance", "Email_attendance", "name_key", "email_key"]].merge(
         students_name[["name_key", "Name", "Email", "UG/PG", "Batch", "Batch Label"]],
         on="name_key",
         how="left",
+        suffixes=("_attendance", "_student"),
     )
     name_match["match_type"] = name_match["Batch Label"].notna().map(lambda x: "Name" if x else "")
 
+    email_matched = email_match[email_match["Batch Label"].notna()].copy()
+
     combined = pd.concat([email_matched, name_match], ignore_index=True, sort=False)
 
-    combined = combined.rename(
+    combined.rename(
         columns={
             "Name_attendance": "Attendance Name",
             "Email_attendance": "Attendance Email",
             "Name": "Student Name",
             "Email": "Student Email",
-        }
+        },
+        inplace=True,
     )
 
     matched = combined[combined["Batch Label"].notna()].copy()
     unmatched = combined[combined["Batch Label"].isna()].copy()
 
-    if not matched.empty:
-        matched["dedupe_key"] = matched["Student Email"].map(normalize_email)
-        blank_mask = matched["dedupe_key"] == ""
-        matched.loc[blank_mask, "dedupe_key"] = matched.loc[blank_mask, "Student Name"].map(normalize_name)
-        matched = matched.drop_duplicates(subset=["Batch Label", "dedupe_key"]).copy()
+    matched["dedupe_key"] = matched["Student Email"].map(normalize_email)
+    blank_mask = matched["dedupe_key"] == ""
+    matched.loc[blank_mask, "dedupe_key"] = matched.loc[blank_mask, "Student Name"].map(normalize_name)
+    matched = matched.drop_duplicates(subset=["Batch Label", "dedupe_key"]).copy()
 
     matched_cols = [
         "Batch Label",
@@ -150,37 +223,41 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
         "Attendance Email",
         "match_type",
     ]
-
     for col in matched_cols:
         if col not in matched.columns:
             matched[col] = ""
 
-    matched = matched[matched_cols].sort_values(
-        by=["Batch Label", "Student Name"],
-        ascending=[True, True]
-    )
+    matched = matched[matched_cols].sort_values(["UG/PG", "Batch", "Student Name"], ascending=[True, True, True])
 
     if not unmatched.empty:
         if "Attendance Name" not in unmatched.columns:
-            unmatched["Attendance Name"] = ""
+            unmatched["Attendance Name"] = unmatched.get("Name_attendance", "")
         if "Attendance Email" not in unmatched.columns:
-            unmatched["Attendance Email"] = ""
-        unmatched = unmatched[["Attendance Name", "Attendance Email"]].drop_duplicates().sort_values(
-            by=["Attendance Name", "Attendance Email"]
-        )
+            unmatched["Attendance Email"] = unmatched.get("Email_attendance", "")
+        unmatched = unmatched[["Attendance Name", "Attendance Email"]].drop_duplicates().sort_values(["Attendance Name", "Attendance Email"])
     else:
         unmatched = pd.DataFrame(columns=["Attendance Name", "Attendance Email"])
 
     return matched, unmatched
 
 
-st.title("Batch Attendance Mapper")
-st.caption("Upload an attendance sheet and automatically distribute attendees into their batches.")
+# -----------------------------
+# App UI
+# -----------------------------
+st.markdown(
+    """
+    <div class="hero-card">
+        <div class="hero-title">Batch Attendance Mapper</div>
+        <div class="hero-subtitle">Upload an attendance sheet and instantly see attendees distributed into their batches.</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 STUDENTS_FILE = "Students.xlsx"
 
 if not Path(STUDENTS_FILE).exists():
-    st.error("Students.xlsx was not found. Put Students.xlsx in the same folder as app.py.")
+    st.error("Students.xlsx was not found. Put Students.xlsx in the same folder as app.py in your GitHub repo.")
     st.stop()
 
 try:
@@ -190,10 +267,7 @@ except Exception as e:
     st.stop()
 
 with st.expander("Preview Students.xlsx", expanded=False):
-    st.dataframe(
-        students_df[["Name", "Email", "UG/PG", "Batch", "Batch Label"]],
-        use_container_width=True
-    )
+    st.dataframe(students_df[["Name", "Email", "UG/PG", "Batch", "Batch Label"]], use_container_width=True)
 
 uploaded_file = st.file_uploader("Upload attendance sheet", type=["xlsx", "xls"])
 
@@ -214,48 +288,46 @@ try:
 
     c4, c5, c6 = st.columns(3)
     c4.metric("Attendance Rows", len(attendance_df))
-    c5.metric("Batches Present", matched_students["Batch Label"].nunique() if not matched_students.empty else 0)
+    c5.metric("Batches Present", matched_students["Batch Label"].nunique())
     c6.metric("Unmatched", len(unmatched_students))
 
     st.subheader("Batch Attendees Count")
-
     if matched_students.empty:
         st.warning("No attendees matched with Students.xlsx.")
     else:
         batch_summary = (
-            matched_students.groupby("Batch Label", dropna=False)
+            matched_students.groupby(["Batch Label"], dropna=False)
             .size()
             .reset_index(name="Attendee Count")
-            .sort_values("Batch Label")
+            .sort_values(["Batch Label"])
         )
-
-        st.dataframe(batch_summary, use_container_width=True)
+        st.dataframe(batch_summary, use_container_width=True, height=260)
 
         st.subheader("Batch-wise Name and Email List")
-
         for _, row in batch_summary.iterrows():
             batch_label = row["Batch Label"]
             count = row["Attendee Count"]
-
             batch_df = matched_students[matched_students["Batch Label"] == batch_label].copy()
-            batch_df = batch_df[["Student Name", "Student Email", "match_type"]].rename(
-                columns={"match_type": "Matched By"}
-            )
+            batch_df = batch_df[["Student Name", "Student Email", "match_type"]].rename(columns={"match_type": "Matched By"})
 
-            with st.expander(f"{batch_label} — {count} attendee(s)"):
-                st.dataframe(batch_df, use_container_width=True)
+            st.markdown(
+                f"""
+                <div class="batch-card">
+                    <div class="batch-title">{batch_label}</div>
+                    <div class="batch-subtitle">{count} attendee(s)</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.dataframe(batch_df, use_container_width=True, height=min(320, 70 + len(batch_df) * 35))
 
     st.subheader("Download Output")
-
     output_path = Path("batch_attendance_output.xlsx")
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         if matched_students.empty:
-            pd.DataFrame(columns=["Batch Label", "Attendee Count"]).to_excel(
-                writer, sheet_name="Batch Summary", index=False
-            )
+            pd.DataFrame(columns=["Batch Label", "Attendee Count"]).to_excel(writer, sheet_name="Batch Summary", index=False)
         else:
             batch_summary.to_excel(writer, sheet_name="Batch Summary", index=False)
-
         matched_students.to_excel(writer, sheet_name="Matched Students", index=False)
         unmatched_students.to_excel(writer, sheet_name="Unmatched Students", index=False)
 
