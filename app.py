@@ -273,7 +273,7 @@ st.markdown(
     """
     <div class="hero-card">
         <div class="hero-title">Batch Attendance Mapper</div>
-        <div class="hero-subtitle">Upload an attendance sheet and instantly see attendees distributed into their batches with safer matching and a cleaner view.</div>
+        <div class="hero-subtitle">Upload an attendance sheet and instantly see attendees distributed into their batches.</div>
     </div>
     """,
     unsafe_allow_html=True,
