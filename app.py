@@ -583,19 +583,18 @@ try:
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Event Details")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Event Name", event_name)
-    c2.metric("Event Date", event_date)
-    c3.metric("Matched Students", len(matched_students))
+    st.text_input("Event Name", value=event_name, disabled=True)
 
-    c4, c5, c6 = st.columns(3)
-    c4.metric("Attendance Rows", len(attendance_df))
-    c5.metric("Batches Present", matched_students["Batch Label"].nunique() if not matched_students.empty else 0)
-    c6.metric("Student Unmatched", len(unmatched_students))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Event Date", event_date)
+    c2.metric("Matched Students", len(matched_students))
+    c3.metric("Attendance Rows", len(attendance_df))
+    c4.metric("Batches Present", matched_students["Batch Label"].nunique() if not matched_students.empty else 0)
+
+    c5, c6 = st.columns(2)
+    c5.metric("Student Unmatched", len(unmatched_students))
     if persona_file_available and not persona_df.empty:
-        c7, c8 = st.columns(2)
-        c7.metric("Matched Personas", len(matched_personas))
-        c8.metric("Persona Unmatched", len(unmatched_personas))
+        c6.metric("Matched Personas", len(matched_personas))
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
