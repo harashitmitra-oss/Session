@@ -398,6 +398,43 @@ def safe_best_persona_match(att_row: pd.Series, personas_df: pd.DataFrame) -> Op
     if is_placeholder_attendee(att_name, att_email):
         return None
 
+    att_canonical = canonical_name_key(att_name)
+    att_compact = compact_name_key(att_name)
+    att_tokens = set(tokens_from_name(att_name))
+
+    def choose_by_persona_name(candidates_df: pd.DataFrame) -> Optional[pd.Series]:
+        if candidates_df.empty:
+            return None
+        exact = candidates_df[candidates_df["persona_canonical_name_key"] == att_canonical].copy()
+        if len(exact) == 1:
+            return exact.iloc[0]
+
+        compact = candidates_df[candidates_df["persona_compact_name_key"] == att_compact].copy()
+        if len(compact) == 1:
+            return compact.iloc[0]
+
+        candidates = []
+        for _, persona in candidates_df.iterrows():
+            persona_name = persona.get("Persona Name", "")
+            persona_tokens = set(tokens_from_name(persona_name))
+            persona_canonical = persona.get("persona_canonical_name_key", "")
+            if not persona_tokens or not att_tokens:
+                continue
+            overlap = len(att_tokens & persona_tokens)
+            sim = similarity(att_canonical, persona_canonical)
+            if sim >= 0.90 or (overlap >= max(1, min(len(att_tokens), len(persona_tokens))) and sim >= 0.75):
+                candidates.append((sim, overlap, persona))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        best = candidates[0]
+        if len(candidates) > 1:
+            second = candidates[1]
+            if abs(best[0] - second[0]) < 0.03 and best[1] == second[1]:
+                return None
+        return best[2]
+
     if att_email != "":
         email_matches = personas_df[
             (personas_df["persona_email_1_key"] == att_email) |
@@ -405,10 +442,10 @@ def safe_best_persona_match(att_row: pd.Series, personas_df: pd.DataFrame) -> Op
         ].copy()
         if len(email_matches) == 1:
             return email_matches.iloc[0]
-
-    att_canonical = canonical_name_key(att_name)
-    att_compact = compact_name_key(att_name)
-    att_tokens = set(tokens_from_name(att_name))
+        if len(email_matches) > 1:
+            chosen = choose_by_persona_name(email_matches)
+            if chosen is not None:
+                return chosen
 
     exact = personas_df[personas_df["persona_canonical_name_key"] == att_canonical].copy()
     if len(exact) == 1:
@@ -418,27 +455,11 @@ def safe_best_persona_match(att_row: pd.Series, personas_df: pd.DataFrame) -> Op
     if len(compact) == 1:
         return compact.iloc[0]
 
-    candidates = []
-    for _, persona in personas_df.iterrows():
-        persona_name = persona.get("Persona Name", "")
-        persona_tokens = set(tokens_from_name(persona_name))
-        persona_canonical = persona.get("persona_canonical_name_key", "")
-        if not persona_tokens or not att_tokens:
-            continue
-        overlap = len(att_tokens & persona_tokens)
-        sim = similarity(att_canonical, persona_canonical)
-        if sim >= 0.92 or (overlap >= max(2, min(len(att_tokens), len(persona_tokens))) and sim >= 0.80):
-            candidates.append((sim, overlap, persona))
+    chosen = choose_by_persona_name(personas_df)
+    if chosen is not None:
+        return chosen
 
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    best = candidates[0]
-    if len(candidates) > 1:
-        second = candidates[1]
-        if abs(best[0] - second[0]) < 0.03 and best[1] == second[1]:
-            return None
-    return best[2]
+    return None
 
 
 def match_personas(attendance_df: pd.DataFrame, personas_df: pd.DataFrame):
