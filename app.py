@@ -650,10 +650,6 @@ try:
             st.dataframe(matched_personas, use_container_width=True, height=min(420, 70 + len(matched_personas) * 35))
         st.markdown('</div>', unsafe_allow_html=True)
 
-        if not unmatched_personas.empty:
-            st.subheader("Unmatched Personas")
-            st.dataframe(unmatched_personas, use_container_width=True, height=280)
-
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Download Output")
     output_path = Path("batch_attendance_output.xlsx")
