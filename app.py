@@ -330,7 +330,9 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
             continue
 
         email_hit = students_email[students_email["email_key"] == email_key]
-        if len(email_hit) == 1:
+        if len(email_hit) >= 1:
+            # Exact email match is definitive for student matching, even if the attendance name differs.
+            # If duplicate student rows share the same email, prefer the first de-duplicated record.
             stu = email_hit.iloc[0]
             matched_rows.append({
                 "Batch Label": stu["Batch Label"],
