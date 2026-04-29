@@ -321,18 +321,9 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
         attendance_email = att.get("Attendance Email", "")
         email_key = att.get("email_key", "")
 
-        if is_placeholder_attendee(attendance_name, attendance_email):
-            unmatched_rows.append({
-                "Attendance Name": attendance_name,
-                "Attendance Email": attendance_email,
-                "Reason": "Placeholder / internal attendee",
-            })
-            continue
-
+        # Exact student email match must always win, even if the attendance display name is generic.
         email_hit = students_email[students_email["email_key"] == email_key]
         if len(email_hit) >= 1:
-            # Exact email match is definitive for student matching, even if the attendance name differs.
-            # If duplicate student rows share the same email, prefer the first de-duplicated record.
             stu = email_hit.iloc[0]
             matched_rows.append({
                 "Batch Label": stu["Batch Label"],
@@ -343,6 +334,15 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
                 "Attendance Name": attendance_name,
                 "Attendance Email": attendance_email,
                 "match_type": "Email",
+            })
+            continue
+
+        # Only treat placeholders as unmatched after exact email matching has failed.
+        if is_placeholder_attendee(attendance_name, attendance_email):
+            unmatched_rows.append({
+                "Attendance Name": attendance_name,
+                "Attendance Email": attendance_email,
+                "Reason": "Placeholder / internal attendee",
             })
             continue
 
@@ -558,9 +558,7 @@ def match_personas(attendance_df: pd.DataFrame, personas_df: pd.DataFrame):
         attendance_name = att.get("Attendance Name", "")
         attendance_email = att.get("Attendance Email", "")
 
-        if is_placeholder_attendee(attendance_name, attendance_email):
-            continue
-
+        # Let persona matching run first, even if the visible name is generic like Zoom/Utente.
         persona = safe_best_persona_match(att, personas_df)
         if persona is not None:
             matched_by = "Persona Name"
@@ -581,12 +579,16 @@ def match_personas(attendance_df: pd.DataFrame, personas_df: pd.DataFrame):
                 "Attendance Email": attendance_email,
                 "Matched By": matched_by,
             })
-        else:
-            unmatched_rows.append({
-                "Attendance Name": attendance_name,
-                "Attendance Email": attendance_email,
-                "Reason": "No safe persona match found",
-            })
+            continue
+
+        if is_placeholder_attendee(attendance_name, attendance_email):
+            continue
+
+        unmatched_rows.append({
+            "Attendance Name": attendance_name,
+            "Attendance Email": attendance_email,
+            "Reason": "No safe persona match found",
+        })
 
     matched = pd.DataFrame(matched_rows)
     unmatched = pd.DataFrame(unmatched_rows)
