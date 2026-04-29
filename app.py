@@ -459,8 +459,8 @@ def match_personas(attendance_df: pd.DataFrame, personas_df: pd.DataFrame):
             matched_by = "Persona Name"
             att_email_key = normalize_email(attendance_email)
             if att_email_key != "" and (
-                att_email_key == persona.get("persona_email_1_key", "") or
-                att_email_key == persona.get("persona_email_2_key", "")
+                att_email_key == normalize_email(persona.get("Persona Email 1", "")) or
+                att_email_key == normalize_email(persona.get("Persona Email 2", ""))
             ):
                 matched_by = "Persona Email"
             matched_rows.append({
@@ -504,6 +504,37 @@ def match_personas(attendance_df: pd.DataFrame, personas_df: pd.DataFrame):
         unmatched = unmatched.drop_duplicates().sort_values(by=["Attendance Name", "Attendance Email"])
 
     return matched, unmatched
+
+
+def build_final_unmatched(attendance_df: pd.DataFrame, matched_students: pd.DataFrame, matched_personas: pd.DataFrame) -> pd.DataFrame:
+    attendance = attendance_df.copy().rename(columns={"Name": "Attendance Name", "Email": "Attendance Email"})
+    attendance["row_key"] = attendance.apply(
+        lambda r: f"{canonical_name_key(r.get('Attendance Name', ''))}||{normalize_email(r.get('Attendance Email', ''))}",
+        axis=1,
+    )
+
+    matched_keys = set()
+
+    if not matched_students.empty:
+        ms = matched_students.copy()
+        ms["row_key"] = ms.apply(
+            lambda r: f"{canonical_name_key(r.get('Attendance Name', ''))}||{normalize_email(r.get('Attendance Email', ''))}",
+            axis=1,
+        )
+        matched_keys.update(ms["row_key"].tolist())
+
+    if not matched_personas.empty:
+        mp = matched_personas.copy()
+        mp["row_key"] = mp.apply(
+            lambda r: f"{canonical_name_key(r.get('Attendance Name', ''))}||{normalize_email(r.get('Attendance Email', ''))}",
+            axis=1,
+        )
+        matched_keys.update(mp["row_key"].tolist())
+
+    final_unmatched = attendance[~attendance["row_key"].isin(matched_keys)].copy()
+    final_unmatched = final_unmatched[["Attendance Name", "Attendance Email"]].drop_duplicates()
+    final_unmatched = final_unmatched.sort_values(by=["Attendance Name", "Attendance Email"])
+    return final_unmatched
 
 
 # -----------------------------
@@ -580,6 +611,7 @@ try:
         pd.DataFrame(columns=["Persona Name", "Student Name", "Persona Email 1", "Persona Email 2", "Phone", "UG/PG", "Attendance Name", "Attendance Email", "Matched By"]),
         pd.DataFrame(columns=["Attendance Name", "Attendance Email", "Reason"])
     )
+    final_unmatched = build_final_unmatched(attendance_df, matched_students, matched_personas)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Event Details")
@@ -592,7 +624,7 @@ try:
     c4.metric("Batches Present", matched_students["Batch Label"].nunique() if not matched_students.empty else 0)
 
     c5, c6 = st.columns(2)
-    c5.metric("Student Unmatched", len(unmatched_students))
+    c5.metric("Final Unmatched", len(final_unmatched))
     if persona_file_available and not persona_df.empty:
         c6.metric("Matched Personas", len(matched_personas))
     st.markdown('</div>', unsafe_allow_html=True)
@@ -655,7 +687,8 @@ try:
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         batch_summary.to_excel(writer, sheet_name="Batch Summary", index=False)
         matched_students.to_excel(writer, sheet_name="Matched Students", index=False)
-        unmatched_students.to_excel(writer, sheet_name="Unmatched Students", index=False)
+        unmatched_students.to_excel(writer, sheet_name="Student Unmatched Debug", index=False)
+        final_unmatched.to_excel(writer, sheet_name="Unmatched Students", index=False)
         if persona_file_available and not persona_df.empty:
             matched_personas.to_excel(writer, sheet_name="Matched Personas", index=False)
             unmatched_personas.to_excel(writer, sheet_name="Unmatched Personas", index=False)
@@ -669,9 +702,9 @@ try:
         )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    if not unmatched_students.empty:
+    if not final_unmatched.empty:
         st.subheader("Unmatched Attendees")
-        st.dataframe(unmatched_students, use_container_width=True, height=300)
+        st.dataframe(final_unmatched, use_container_width=True, height=300)
 
     with st.expander("Preview uploaded attendance file", expanded=False):
         st.dataframe(attendance_df, use_container_width=True, height=280)
