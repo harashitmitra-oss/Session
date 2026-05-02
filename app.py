@@ -656,10 +656,10 @@ def render_country_round_plot(country_df: pd.DataFrame):
                 r=chart_df["Attendee Count"],
                 theta=chart_df["Country"],
                 text=chart_df["Attendee Count"],
-                textposition="inside",
                 marker_line_color="white",
                 marker_line_width=1,
                 opacity=0.9,
+                hovertemplate="Country: %{theta}<br>Attendees: %{r}<extra></extra>",
             )
         ]
     )
