@@ -196,18 +196,20 @@ def get_gspread_client():
     if gspread is None or Credentials is None:
         raise RuntimeError("gspread/google-auth are not installed. Add them to requirements.txt.")
 
-    if "gcp_service_account" not in st.secrets:
-        raise RuntimeError("Missing gcp_service_account in Streamlit secrets.")
+    if "GOOGLE_SERVICE_ACCOUNT" not in st.secrets:
+        raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT in Streamlit secrets.")
 
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
     ]
-    creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
+    creds = Credentials.from_service_account_info(dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"]), scopes=scopes)
     return gspread.authorize(creds)
 
 
 def open_master_spreadsheet(client):
+    if "GSHEET_SPREADSHEET_ID" in st.secrets:
+        return client.open_by_key(st.secrets["GSHEET_SPREADSHEET_ID"])
     if "google_sheet_id" in st.secrets:
         return client.open_by_key(st.secrets["google_sheet_id"])
     if "GOOGLE_SHEET_ID" in st.secrets:
@@ -216,7 +218,7 @@ def open_master_spreadsheet(client):
         return client.open_by_url(st.secrets["google_sheet_url"])
     if "GOOGLE_SHEET_URL" in st.secrets:
         return client.open_by_url(st.secrets["GOOGLE_SHEET_URL"])
-    raise RuntimeError("Provide google_sheet_id or google_sheet_url in Streamlit secrets.")
+    raise RuntimeError("Provide GSHEET_SPREADSHEET_ID, google_sheet_id, or google_sheet_url in Streamlit secrets.")
 
 
 def worksheet_to_dataframe(ws) -> pd.DataFrame:
