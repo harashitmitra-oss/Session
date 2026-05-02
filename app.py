@@ -496,7 +496,8 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
                 "UG/PG": stu["UG/PG"],
                 "Batch": stu["Batch"],
                 "Country": stu["Country"],
-                "Payment Status": stu["Payment Status"],
+                "Status": stu["Status"],
+                "Payment Status": stu["Payment Status"], "Payment Status": stu["Payment Status"],
                 "Student Name": stu["Name"],
                 "Student Email": stu["Email"],
                 "Attendance Name": attendance_name,
@@ -542,7 +543,7 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
     unmatched = pd.DataFrame(unmatched_rows)
 
     if matched.empty:
-        matched = pd.DataFrame(columns=["Batch Label", "UG/PG", "Batch", "Country", "Payment Status", "Student Name", "Student Email", "Attendance Name", "Attendance Email", "match_type"])
+        matched = pd.DataFrame(columns=["Batch Label", "UG/PG", "Batch", "Country", "Status", "Payment Status", "Student Name", "Student Email", "Attendance Name", "Attendance Email", "match_type"])
     else:
         matched["dedupe_key"] = matched["Student Email"].map(normalize_email)
         blank_mask = matched["dedupe_key"] == ""
@@ -704,7 +705,7 @@ st.markdown(
     """
     <div class="hero-card">
         <div class="hero-title">Batch Attendance Mapper</div>
-        <div class="hero-subtitle">Upload an attendance sheet and see student, persona, batch, paid/unpaid, and country-level attendance insights from the live Google Sheet.</div>
+        <div class="hero-subtitle">Upload an attendance sheet and see student, persona, batch, paid/unpaid, and country-level attendance insights</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -891,12 +892,11 @@ try:
     if unpaid_students_df.empty:
         st.info("No unpaid students attended this event.")
     else:
-        unpaid_students_df = unpaid_students_df[["Student Name", "Student Email", "Batch Label", "Payment Status", "Country"]].copy()
+        unpaid_students_df = unpaid_students_df[["Student Name", "Student Email", "Batch Label", "Status", "Country"]].copy()
         unpaid_students_df = unpaid_students_df.rename(columns={
             "Student Name": "Name",
             "Student Email": "Email",
             "Batch Label": "Batch",
-            "Payment Status": "Status",
         }).sort_values(["Batch", "Name"], ascending=[True, True])
         st.dataframe(unpaid_students_df, use_container_width=True, height=min(1400, 80 + len(unpaid_students_df) * 35))
     st.markdown('</div>', unsafe_allow_html=True)
