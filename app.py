@@ -834,25 +834,25 @@ try:
         else:
             st.dataframe(ugpg_summary, use_container_width=True)
     with table_row_1_col_2:
-        st.subheader("Batch Attendees Count")
-        if batch_summary.empty:
-            st.warning("No attendees matched with the Google Sheet master data.")
-        else:
-            st.dataframe(batch_summary, use_container_width=True)
-
-    table_row_2_col_1, table_row_2_col_2 = st.columns(2)
-    with table_row_2_col_1:
         st.subheader("Paid vs Unpaid Students Attended")
         if paid_summary.empty:
             st.info("No matched students found for paid/unpaid analysis.")
         else:
             st.dataframe(paid_summary, use_container_width=True)
+
+    table_row_2_col_1, table_row_2_col_2 = st.columns(2)
+    with table_row_2_col_1:
+        st.subheader("Batch Attendees Count")
+        if batch_summary.empty:
+            st.warning("No attendees matched with the Google Sheet master data.")
+        else:
+            st.dataframe(batch_summary, use_container_width=True, height=min(1200, 80 + len(batch_summary) * 35))
     with table_row_2_col_2:
         st.subheader("Country-wise Students Attended")
         if country_summary.empty:
             st.info("No matched students found for country analysis.")
         else:
-            st.dataframe(country_summary, use_container_width=True)
+            st.dataframe(country_summary, use_container_width=True, height=min(1200, 80 + len(country_summary) * 35))
     st.markdown('</div>', unsafe_allow_html=True)
 
     if not matched_students.empty:
