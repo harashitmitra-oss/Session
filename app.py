@@ -780,16 +780,35 @@ try:
         c6.metric("Matched Personas", len(matched_personas))
     st.markdown('</div>', unsafe_allow_html=True)
 
-        if matched_students.empty:
+    if matched_students.empty:
         ugpg_summary = pd.DataFrame(columns=["UG/PG", "Attendee Count"])
         batch_summary = pd.DataFrame(columns=["Batch Label", "Attendee Count"])
         paid_summary = pd.DataFrame(columns=["Payment Status", "Attendee Count"])
         country_summary = pd.DataFrame(columns=["Country", "Attendee Count"])
     else:
-        ugpg_summary = matched_students.groupby("UG/PG", dropna=False).size().reset_index(name="Attendee Count").sort_values("UG/PG")
-        batch_summary = matched_students.groupby("Batch Label", dropna=False).size().reset_index(name="Attendee Count").sort_values("Batch Label")
-        paid_summary = matched_students.groupby("Payment Status", dropna=False).size().reset_index(name="Attendee Count").sort_values("Payment Status")
-        country_summary = matched_students.groupby("Country", dropna=False).size().reset_index(name="Attendee Count")
+        ugpg_summary = (
+            matched_students.groupby("UG/PG", dropna=False)
+            .size()
+            .reset_index(name="Attendee Count")
+            .sort_values("UG/PG")
+        )
+        batch_summary = (
+            matched_students.groupby("Batch Label", dropna=False)
+            .size()
+            .reset_index(name="Attendee Count")
+            .sort_values("Batch Label")
+        )
+        paid_summary = (
+            matched_students.groupby("Payment Status", dropna=False)
+            .size()
+            .reset_index(name="Attendee Count")
+            .sort_values("Payment Status")
+        )
+        country_summary = (
+            matched_students.groupby("Country", dropna=False)
+            .size()
+            .reset_index(name="Attendee Count")
+        )
         country_summary["Country"] = country_summary["Country"].replace({"": "Unknown", "nan": "Unknown"})
         country_summary = country_summary.sort_values("Attendee Count", ascending=False)
 
@@ -833,7 +852,7 @@ try:
         st.info("No matched students found for country analysis.")
     else:
         st.dataframe(country_summary, use_container_width=True, height=260)
-    st.markdown('</div>', unsafe_allow_html=True\)
+    st.markdown('</div>', unsafe_allow_html=True)
 
     if not matched_students.empty:
         st.subheader("Batch-wise Name, Email, Country and Payment Status")
