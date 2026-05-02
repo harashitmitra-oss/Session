@@ -886,6 +886,22 @@ try:
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Unpaid Students Attended")
+    unpaid_students_df = matched_students[matched_students["Payment Status"] == "Unpaid"].copy() if not matched_students.empty else pd.DataFrame()
+    if unpaid_students_df.empty:
+        st.info("No unpaid students attended this event.")
+    else:
+        unpaid_students_df = unpaid_students_df[["Student Name", "Student Email", "Batch Label", "Payment Status", "Country"]].copy()
+        unpaid_students_df = unpaid_students_df.rename(columns={
+            "Student Name": "Name",
+            "Student Email": "Email",
+            "Batch Label": "Batch",
+            "Payment Status": "Status",
+        }).sort_values(["Batch", "Name"], ascending=[True, True])
+        st.dataframe(unpaid_students_df, use_container_width=True, height=min(1400, 80 + len(unpaid_students_df) * 35))
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Download Output")
     output_path = Path("batch_attendance_output.xlsx")
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
