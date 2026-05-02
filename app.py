@@ -645,29 +645,28 @@ def render_country_round_plot(country_df: pd.DataFrame):
         st.info("No country data available for the matched attendees.")
         return
 
-    chart_df = round_bar_chart_input(country_df, "Country", "Attendee Count", top_n=12)
+    chart_df = round_bar_chart_input(country_df, "Country", "Attendee Count", top_n=10)
     if chart_df.empty:
         st.info("No country data available for the matched attendees.")
         return
 
-    fig = go.Figure(
-        data=[
-            go.Barpolar(
-                r=chart_df["Attendee Count"],
-                theta=chart_df["Country"],
-                text=chart_df["Attendee Count"],
-                marker_line_color="white",
-                marker_line_width=1,
-                opacity=0.9,
-                hovertemplate="Country: %{theta}<br>Attendees: %{r}<extra></extra>",
-            )
-        ]
+    fig = px.pie(
+        chart_df,
+        names="Country",
+        values="Attendee Count",
+        hole=0.6,
+    )
+    fig.update_traces(
+        textposition="inside",
+        textinfo="label+percent",
+        sort=False,
+        hovertemplate="%{label}<br>Attendees: %{value}<br>Share: %{percent}<extra></extra>",
     )
     fig.update_layout(
         height=420,
-        polar=dict(radialaxis=dict(showticklabels=True, ticks="")),
-        margin=dict(l=20, r=20, t=20, b=20),
-        showlegend=False,
+        margin=dict(l=20, r=20, t=40, b=20),
+        legend_title_text="",
+        title="Country-wise Students Attended",
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -813,45 +812,45 @@ try:
         country_summary = country_summary.sort_values("Attendee Count", ascending=False)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    c_chart1, c_chart2, c_chart3, c_chart4 = st.columns(4)
-    with c_chart1:
+    chart_row_1_col_1, chart_row_1_col_2 = st.columns(2)
+    with chart_row_1_col_1:
         render_donut_chart(ugpg_summary, "UG/PG", "Attendee Count", "UG / PG Distribution")
-    with c_chart2:
+    with chart_row_1_col_2:
         render_donut_chart(batch_summary.head(10), "Batch Label", "Attendee Count", "Batch Attendees Count")
-    with c_chart3:
+
+    chart_row_2_col_1, chart_row_2_col_2 = st.columns(2)
+    with chart_row_2_col_1:
         render_donut_chart(paid_summary, "Payment Status", "Attendee Count", "Paid vs Unpaid Students Attended")
-    with c_chart4:
+    with chart_row_2_col_2:
         render_country_round_plot(country_summary)
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    t1, t2, t3 = st.columns(3)
+    t1, t2, t3, t4 = st.columns(4)
     with t1:
         st.subheader("UG / PG Distribution")
         if ugpg_summary.empty:
             st.info("No matched students found for UG / PG distribution.")
         else:
-            st.dataframe(ugpg_summary, use_container_width=True, height=220)
+            st.dataframe(ugpg_summary, use_container_width=True)
     with t2:
         st.subheader("Batch Attendees Count")
         if batch_summary.empty:
             st.warning("No attendees matched with the Google Sheet master data.")
         else:
-            st.dataframe(batch_summary, use_container_width=True, height=220)
+            st.dataframe(batch_summary, use_container_width=True)
     with t3:
         st.subheader("Paid vs Unpaid Students Attended")
         if paid_summary.empty:
             st.info("No matched students found for paid/unpaid analysis.")
         else:
-            st.dataframe(paid_summary, use_container_width=True, height=220)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("Country-wise Students Attended")
-    if country_summary.empty:
-        st.info("No matched students found for country analysis.")
-    else:
-        st.dataframe(country_summary, use_container_width=True, height=260)
+            st.dataframe(paid_summary, use_container_width=True)
+    with t4:
+        st.subheader("Country-wise Students Attended")
+        if country_summary.empty:
+            st.info("No matched students found for country analysis.")
+        else:
+            st.dataframe(country_summary, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     if not matched_students.empty:
