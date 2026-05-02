@@ -673,7 +673,7 @@ def render_country_round_plot(country_df: pd.DataFrame):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_donut_chart(df: pd.DataFrame, names_col: str, values_col: str, title: str):
+def render_donut_chart(df: pd.DataFrame, names_col: str, values_col: str, title: str, custom_text_col: Optional[str] = None):
     if df.empty or df[values_col].sum() == 0:
         st.info(f"No data available for {title}.")
         return
@@ -684,12 +684,23 @@ def render_donut_chart(df: pd.DataFrame, names_col: str, values_col: str, title:
         values=values_col,
         hole=0.6,
     )
-    fig.update_traces(
-        textposition="inside",
-        texttemplate="%{label}<br>%{value} | %{percent}",
-        sort=False,
-        hovertemplate=f"%{{label}}<br>{title}: %{{value}}<br>Share: %{{percent}}<extra></extra>",
-    )
+
+    if custom_text_col and custom_text_col in df.columns:
+        fig.update_traces(
+            textposition="inside",
+            text=df[custom_text_col],
+            textinfo="text",
+            sort=False,
+            hovertemplate=f"%{{label}}<br>{title}: %{{value}}<br>Share: %{{percent}}<extra></extra>",
+        )
+    else:
+        fig.update_traces(
+            textposition="inside",
+            texttemplate="%{label}<br>%{value} | %{percent}",
+            sort=False,
+            hovertemplate=f"%{{label}}<br>{title}: %{{value}}<br>Share: %{{percent}}<extra></extra>",
+        )
+
     fig.update_layout(
         height=420,
         margin=dict(l=20, r=20, t=40, b=20),
@@ -706,7 +717,7 @@ st.markdown(
     """
     <div class="hero-card">
         <div class="hero-title">Batch Attendance Mapper</div>
-        <div class="hero-subtitle">Upload an Attendance sheet and see Student, Persona, Batch, Paid/Unpaid, and Country-level Attendance Insights.</div>
+        <div class="hero-subtitle">Upload an attendance sheet and see student, persona, batch, paid/unpaid, and country-level attendance insights from the live Google Sheet.</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -789,9 +800,21 @@ try:
     else:
         ugpg_summary = (
             matched_students.groupby("UG/PG", dropna=False)
-            .size()
-            .reset_index(name="Attendee Count")
+            .agg(
+                **{
+                    "Attendee Count": ("Student Name", "size"),
+                    "Paid Count": ("Payment Status", lambda s: (s == "Paid").sum()),
+                    "Unpaid Count": ("Payment Status", lambda s: (s == "Unpaid").sum()),
+                }
+            )
+            .reset_index()
             .sort_values("UG/PG")
+        )
+        ugpg_summary["Paid %"] = (ugpg_summary["Paid Count"] / ugpg_summary["Attendee Count"] * 100).fillna(0).round(1)
+        ugpg_summary["Unpaid %"] = (ugpg_summary["Unpaid Count"] / ugpg_summary["Attendee Count"] * 100).fillna(0).round(1)
+        ugpg_summary["Display Text"] = ugpg_summary.apply(
+            lambda r: f"{r['UG/PG']}<br>Total: {int(r['Attendee Count'])}<br>Paid: {int(r['Paid Count'])} ({r['Paid %']:.1f}%)<br>Unpaid: {int(r['Unpaid Count'])} ({r['Unpaid %']:.1f}%)",
+            axis=1,
         )
         batch_summary = (
             matched_students.groupby("Batch Label", dropna=False)
@@ -816,7 +839,7 @@ try:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     chart_row_1_col_1, chart_row_1_col_2 = st.columns(2)
     with chart_row_1_col_1:
-        render_donut_chart(ugpg_summary, "UG/PG", "Attendee Count", "UG / PG Distribution")
+        render_donut_chart(ugpg_summary, "UG/PG", "Attendee Count", "UG / PG Distribution", custom_text_col="Display Text")
     with chart_row_1_col_2:
         render_donut_chart(batch_summary.head(10), "Batch Label", "Attendee Count", "Batch Attendees Count")
 
@@ -834,7 +857,7 @@ try:
         if ugpg_summary.empty:
             st.info("No matched students found for UG / PG distribution.")
         else:
-            st.dataframe(ugpg_summary, use_container_width=True)
+            st.dataframe(ugpg_summary[["UG/PG", "Attendee Count", "Paid Count", "Paid %", "Unpaid Count", "Unpaid %"]], use_container_width=True)
     with table_row_1_col_2:
         st.subheader("Paid vs Unpaid Students Attended")
         if paid_summary.empty:
