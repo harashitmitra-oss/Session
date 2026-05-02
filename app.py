@@ -5,6 +5,8 @@ from typing import List, Optional, Tuple
 from difflib import SequenceMatcher
 
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 try:
@@ -648,8 +650,6 @@ def render_country_round_plot(country_df: pd.DataFrame):
         st.info("No country data available for the matched attendees.")
         return
 
-    import plotly.graph_objects as go
-
     fig = go.Figure(
         data=[
             go.Barpolar(
@@ -664,10 +664,36 @@ def render_country_round_plot(country_df: pd.DataFrame):
         ]
     )
     fig.update_layout(
-        height=520,
+        height=420,
         polar=dict(radialaxis=dict(showticklabels=True, ticks="")),
-        margin=dict(l=30, r=30, t=30, b=30),
+        margin=dict(l=20, r=20, t=20, b=20),
         showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_donut_chart(df: pd.DataFrame, names_col: str, values_col: str, title: str):
+    if df.empty or df[values_col].sum() == 0:
+        st.info(f"No data available for {title}.")
+        return
+
+    fig = px.pie(
+        df,
+        names=names_col,
+        values=values_col,
+        hole=0.6,
+    )
+    fig.update_traces(
+        textposition="inside",
+        textinfo="label+percent",
+        sort=False,
+        hovertemplate=f"%{{label}}<br>{title}: %{{value}}<br>Share: %{{percent}}<extra></extra>",
+    )
+    fig.update_layout(
+        height=420,
+        margin=dict(l=20, r=20, t=40, b=20),
+        legend_title_text="",
+        title=title,
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -754,48 +780,60 @@ try:
         c6.metric("Matched Personas", len(matched_personas))
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("UG / PG Distribution")
-    if matched_students.empty:
+        if matched_students.empty:
         ugpg_summary = pd.DataFrame(columns=["UG/PG", "Attendee Count"])
-        st.info("No matched students found for UG / PG distribution.")
+        batch_summary = pd.DataFrame(columns=["Batch Label", "Attendee Count"])
+        paid_summary = pd.DataFrame(columns=["Payment Status", "Attendee Count"])
+        country_summary = pd.DataFrame(columns=["Country", "Attendee Count"])
     else:
         ugpg_summary = matched_students.groupby("UG/PG", dropna=False).size().reset_index(name="Attendee Count").sort_values("UG/PG")
-        st.dataframe(ugpg_summary, use_container_width=True, height=160)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("Batch Attendees Count")
-    if matched_students.empty:
-        batch_summary = pd.DataFrame(columns=["Batch Label", "Attendee Count"])
-        st.warning("No attendees matched with the Google Sheet master data.")
-    else:
         batch_summary = matched_students.groupby("Batch Label", dropna=False).size().reset_index(name="Attendee Count").sort_values("Batch Label")
-        st.dataframe(batch_summary, use_container_width=True, height=260)
+        paid_summary = matched_students.groupby("Payment Status", dropna=False).size().reset_index(name="Attendee Count").sort_values("Payment Status")
+        country_summary = matched_students.groupby("Country", dropna=False).size().reset_index(name="Attendee Count")
+        country_summary["Country"] = country_summary["Country"].replace({"": "Unknown", "nan": "Unknown"})
+        country_summary = country_summary.sort_values("Attendee Count", ascending=False)
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    c_chart1, c_chart2, c_chart3, c_chart4 = st.columns(4)
+    with c_chart1:
+        render_donut_chart(ugpg_summary, "UG/PG", "Attendee Count", "UG / PG Distribution")
+    with c_chart2:
+        render_donut_chart(batch_summary.head(10), "Batch Label", "Attendee Count", "Batch Attendees Count")
+    with c_chart3:
+        render_donut_chart(paid_summary, "Payment Status", "Attendee Count", "Paid vs Unpaid Students Attended")
+    with c_chart4:
+        render_country_round_plot(country_summary)
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("Paid vs Unpaid Students Attended")
-    if matched_students.empty:
-        paid_summary = pd.DataFrame(columns=["Payment Status", "Attendee Count"])
-        st.info("No matched students found for paid/unpaid analysis.")
-    else:
-        paid_summary = matched_students.groupby("Payment Status", dropna=False).size().reset_index(name="Attendee Count").sort_values("Payment Status")
-        st.dataframe(paid_summary, use_container_width=True, height=160)
+    t1, t2, t3 = st.columns(3)
+    with t1:
+        st.subheader("UG / PG Distribution")
+        if ugpg_summary.empty:
+            st.info("No matched students found for UG / PG distribution.")
+        else:
+            st.dataframe(ugpg_summary, use_container_width=True, height=220)
+    with t2:
+        st.subheader("Batch Attendees Count")
+        if batch_summary.empty:
+            st.warning("No attendees matched with the Google Sheet master data.")
+        else:
+            st.dataframe(batch_summary, use_container_width=True, height=220)
+    with t3:
+        st.subheader("Paid vs Unpaid Students Attended")
+        if paid_summary.empty:
+            st.info("No matched students found for paid/unpaid analysis.")
+        else:
+            st.dataframe(paid_summary, use_container_width=True, height=220)
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Country-wise Students Attended")
-    if matched_students.empty:
-        country_summary = pd.DataFrame(columns=["Country", "Attendee Count"])
+    if country_summary.empty:
         st.info("No matched students found for country analysis.")
     else:
-        country_summary = matched_students.groupby("Country", dropna=False).size().reset_index(name="Attendee Count")
-        country_summary["Country"] = country_summary["Country"].replace({"": "Unknown", "nan": "Unknown"})
-        country_summary = country_summary.sort_values("Attendee Count", ascending=False)
-        render_country_round_plot(country_summary)
         st.dataframe(country_summary, use_container_width=True, height=260)
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True\)
 
     if not matched_students.empty:
         st.subheader("Batch-wise Name, Email, Country and Payment Status")
