@@ -812,8 +812,9 @@ try:
         )
         ugpg_summary["Paid %"] = (ugpg_summary["Paid Count"] / ugpg_summary["Attendee Count"] * 100).fillna(0).round(1)
         ugpg_summary["Unpaid %"] = (ugpg_summary["Unpaid Count"] / ugpg_summary["Attendee Count"] * 100).fillna(0).round(1)
+        ugpg_summary["UG/PG %"] = (ugpg_summary["Attendee Count"] / ugpg_summary["Attendee Count"].sum() * 100).fillna(0).round(1)
         ugpg_summary["Display Text"] = ugpg_summary.apply(
-            lambda r: f"{r['UG/PG']}<br>Total: {int(r['Attendee Count'])}<br>Paid: {int(r['Paid Count'])} ({r['Paid %']:.1f}%)<br>Unpaid: {int(r['Unpaid Count'])} ({r['Unpaid %']:.1f}%)",
+            lambda r: f"{r['UG/PG']} ({r['UG/PG %']:.1f}%)<br>Total: {int(r['Attendee Count'])}<br>Paid: {int(r['Paid Count'])} ({r['Paid %']:.1f}%)<br>Unpaid: {int(r['Unpaid Count'])} ({r['Unpaid %']:.1f}%)",
             axis=1,
         )
         batch_summary = (
@@ -857,7 +858,7 @@ try:
         if ugpg_summary.empty:
             st.info("No matched students found for UG / PG distribution.")
         else:
-            st.dataframe(ugpg_summary[["UG/PG", "Attendee Count", "Paid Count", "Paid %", "Unpaid Count", "Unpaid %"]], use_container_width=True)
+            st.dataframe(ugpg_summary[["UG/PG", "Attendee Count", "UG/PG %", "Paid Count", "Paid %", "Unpaid Count", "Unpaid %"]], use_container_width=True)
     with table_row_1_col_2:
         st.subheader("Paid vs Unpaid Students Attended")
         if paid_summary.empty:
