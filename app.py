@@ -497,7 +497,7 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
                 "Batch": stu["Batch"],
                 "Country": stu["Country"],
                 "Status": stu["Status"],
-                "Payment Status": stu["Payment Status"], "Payment Status": stu["Payment Status"],
+                "Payment Status": stu["Payment Status"],
                 "Student Name": stu["Name"],
                 "Student Email": stu["Email"],
                 "Attendance Name": attendance_name,
@@ -524,6 +524,7 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
                 "UG/PG": stu["UG/PG"],
                 "Batch": stu["Batch"],
                 "Country": stu["Country"],
+                "Status": stu["Status"],
                 "Payment Status": stu["Payment Status"],
                 "Student Name": stu["Name"],
                 "Student Email": stu["Email"],
@@ -705,7 +706,7 @@ st.markdown(
     """
     <div class="hero-card">
         <div class="hero-title">Batch Attendance Mapper</div>
-        <div class="hero-subtitle">Upload an attendance sheet and see student, persona, batch, paid/unpaid, and country-level attendance insights</div>
+        <div class="hero-subtitle">Upload an Attendance sheet and see Student, Persona, Batch, Paid/Unpaid, and Country-level Attendance Insights.</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -892,6 +893,38 @@ try:
     if unpaid_students_df.empty:
         st.info("No unpaid students attended this event.")
     else:
+        if "Status" not in unpaid_students_df.columns:
+            unpaid_students_df["Status"] = ""
+
+        tmp_students_status = students_df.copy()
+        tmp_students_status["email_key_tmp"] = tmp_students_status["Email"].map(normalize_email)
+        tmp_students_status["name_key_tmp"] = tmp_students_status["Name"].map(canonical_name_key)
+
+        status_email_map = (
+            tmp_students_status[tmp_students_status["email_key_tmp"] != ""]
+            .drop_duplicates(subset=["email_key_tmp"])
+            .set_index("email_key_tmp")["Status"]
+            .to_dict()
+        )
+        status_name_map = (
+            tmp_students_status[tmp_students_status["name_key_tmp"] != ""]
+            .drop_duplicates(subset=["name_key_tmp"])
+            .set_index("name_key_tmp")["Status"]
+            .to_dict()
+        )
+
+        missing_status_mask = unpaid_students_df["Status"].fillna("").astype(str).str.strip() == ""
+        if missing_status_mask.any():
+            unpaid_students_df.loc[missing_status_mask, "Status"] = unpaid_students_df.loc[missing_status_mask, "Student Email"].map(
+                lambda x: status_email_map.get(normalize_email(x), "")
+            )
+
+        still_missing_mask = unpaid_students_df["Status"].fillna("").astype(str).str.strip() == ""
+        if still_missing_mask.any():
+            unpaid_students_df.loc[still_missing_mask, "Status"] = unpaid_students_df.loc[still_missing_mask, "Student Name"].map(
+                lambda x: status_name_map.get(canonical_name_key(x), "")
+            )
+
         unpaid_students_df = unpaid_students_df[["Student Name", "Student Email", "Batch Label", "Status", "Country"]].copy()
         unpaid_students_df = unpaid_students_df.rename(columns={
             "Student Name": "Name",
