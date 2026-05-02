@@ -658,7 +658,7 @@ def render_country_round_plot(country_df: pd.DataFrame):
     )
     fig.update_traces(
         textposition="inside",
-        textinfo="label+percent",
+        texttemplate="%{label}<br>%{value} | %{percent}",
         sort=False,
         hovertemplate="%{label}<br>Attendees: %{value}<br>Share: %{percent}<extra></extra>",
     )
@@ -684,7 +684,7 @@ def render_donut_chart(df: pd.DataFrame, names_col: str, values_col: str, title:
     )
     fig.update_traces(
         textposition="inside",
-        textinfo="label+percent",
+        texttemplate="%{label}<br>%{value} | %{percent}",
         sort=False,
         hovertemplate=f"%{{label}}<br>{title}: %{{value}}<br>Share: %{{percent}}<extra></extra>",
     )
@@ -826,26 +826,28 @@ try:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    t1, t2, t3, t4 = st.columns(4)
-    with t1:
+    table_row_1_col_1, table_row_1_col_2 = st.columns(2)
+    with table_row_1_col_1:
         st.subheader("UG / PG Distribution")
         if ugpg_summary.empty:
             st.info("No matched students found for UG / PG distribution.")
         else:
             st.dataframe(ugpg_summary, use_container_width=True)
-    with t2:
+    with table_row_1_col_2:
         st.subheader("Batch Attendees Count")
         if batch_summary.empty:
             st.warning("No attendees matched with the Google Sheet master data.")
         else:
             st.dataframe(batch_summary, use_container_width=True)
-    with t3:
+
+    table_row_2_col_1, table_row_2_col_2 = st.columns(2)
+    with table_row_2_col_1:
         st.subheader("Paid vs Unpaid Students Attended")
         if paid_summary.empty:
             st.info("No matched students found for paid/unpaid analysis.")
         else:
             st.dataframe(paid_summary, use_container_width=True)
-    with t4:
+    with table_row_2_col_2:
         st.subheader("Country-wise Students Attended")
         if country_summary.empty:
             st.info("No matched students found for country analysis.")
