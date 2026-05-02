@@ -717,7 +717,7 @@ st.markdown(
     """
     <div class="hero-card">
         <div class="hero-title">Batch Attendance Mapper</div>
-        <div class="hero-subtitle">Upload an attendance sheet and see student, persona, batch, paid/unpaid, and country-level attendance insights from the live Google Sheet.</div>
+        <div class="hero-subtitle">Upload an Attendance sheet and see Student, Persona, Batch, Paid/Unpaid, and Country-level Attendance Insights.</div>
     </div>
     """,
     unsafe_allow_html=True,
