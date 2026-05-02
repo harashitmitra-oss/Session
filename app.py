@@ -1,10 +1,18 @@
 import re
+from io import BytesIO
 from pathlib import Path
 from typing import List, Optional, Tuple
 from difflib import SequenceMatcher
 
 import pandas as pd
 import streamlit as st
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except Exception:
+    gspread = None
+    Credentials = None
 
 
 st.set_page_config(page_title="Batch Attendance Mapper", layout="wide")
@@ -18,7 +26,7 @@ st.markdown(
     .block-container {
         padding-top: 1.4rem;
         padding-bottom: 2rem;
-        max-width: 1200px;
+        max-width: 1250px;
     }
     .hero-card {
         background: linear-gradient(135deg, #0f172a 0%, #1d4ed8 100%);
@@ -40,7 +48,7 @@ st.markdown(
     .section-card {
         background: white;
         border-radius: 20px;
-        padding: 1rem 1rem 0.75rem 1rem;
+        padding: 1rem 1rem 0.8rem 1rem;
         box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
         border: 1px solid rgba(148, 163, 184, 0.18);
         margin-bottom: 1rem;
@@ -108,7 +116,6 @@ def canonical_name_key(value: str) -> str:
     tokens = tokens_from_name(value)
     if not tokens:
         return ""
-    # Remove one-letter tail tokens like B, M, C when present
     if len(tokens) >= 2 and len(tokens[-1]) == 1:
         tokens = tokens[:-1]
     return " ".join(tokens)
@@ -153,6 +160,7 @@ def is_placeholder_attendee(name: str, email: str) -> bool:
         "tetr college of business",
         "zoom",
         "host",
+        "utente zoom",
     ]
     return any(marker in combined for marker in markers)
 
@@ -161,88 +169,126 @@ def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
-def safe_best_name_match(att_row: pd.Series, students_df: pd.DataFrame) -> Optional[pd.Series]:
-    att_name = att_row.get("Attendance Name", "")
-    att_email = normalize_email(att_row.get("Attendance Email", ""))
-    if canonical_name_key(att_name) == "":
-        return None
-    if is_placeholder_attendee(att_name, att_email):
-        return None
+def coalesce_series(df: pd.DataFrame, candidates: List[str], default: str = "") -> pd.Series:
+    for col in candidates:
+        if col in df.columns:
+            return df[col]
+    return pd.Series([default] * len(df), index=df.index)
 
-    att_canonical = canonical_name_key(att_name)
-    att_tokens = set(tokens_from_name(att_name))
-    att_compact = compact_name_key(att_name)
 
-    # Stage A: exact canonical match among unique names
-    exact = students_df[students_df["canonical_name_key"] == att_canonical].copy()
-    if len(exact) == 1:
-        return exact.iloc[0]
+def payment_status_from_value(value: str) -> str:
+    text = normalize_text(value)
+    if text == "admitted" or text == "paid":
+        return "Paid"
+    return "Unpaid"
 
-    # Stage B: compact match catches punctuation/spacing variants
-    compact = students_df[students_df["compact_name_key"] == att_compact].copy()
-    if len(compact) == 1:
-        return compact.iloc[0]
 
-    # Stage C: token-subset / near-match heuristic, only if one safe candidate exists
-    candidates = []
-    for _, stu in students_df.iterrows():
-        stu_name = stu.get("Name", "")
-        stu_tokens = set(tokens_from_name(stu_name))
-        stu_canonical = stu.get("canonical_name_key", "")
-        if not stu_tokens or not att_tokens:
-            continue
-
-        inter = att_tokens & stu_tokens
-        overlap = len(inter)
-        sim = similarity(att_canonical, stu_canonical)
-
-        # Require strong agreement: either almost exact similarity or substantial token overlap
-        if sim >= 0.92 or (overlap >= max(2, min(len(att_tokens), len(stu_tokens))) and sim >= 0.80):
-            candidates.append((sim, overlap, stu))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    best = candidates[0]
-
-    # Avoid ambiguous matches if top two are too close
-    if len(candidates) > 1:
-        second = candidates[1]
-        if abs(best[0] - second[0]) < 0.03 and best[1] == second[1]:
-            return None
-
-    return best[2]
+def round_bar_chart_input(df: pd.DataFrame, label_col: str, value_col: str, top_n: int = 12) -> pd.DataFrame:
+    chart_df = df[[label_col, value_col]].copy()
+    chart_df = chart_df[chart_df[value_col] > 0].sort_values(value_col, ascending=False).head(top_n)
+    return chart_df
 
 
 # -----------------------------
-# Data loaders
+# Google Sheets master data
 # -----------------------------
-def load_students(student_file_path: str) -> pd.DataFrame:
-    df = pd.read_excel(student_file_path)
-    df.columns = [str(c).strip() for c in df.columns]
+def get_gspread_client():
+    if gspread is None or Credentials is None:
+        raise RuntimeError("gspread/google-auth are not installed. Add them to requirements.txt.")
 
-    required = ["Name", "Email", "UG/PG", "Batch"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Students file is missing required columns: {', '.join(missing)}")
+    if "gcp_service_account" not in st.secrets:
+        raise RuntimeError("Missing gcp_service_account in Streamlit secrets.")
 
-    df = df[required].copy()
-    df["Name"] = df["Name"].fillna("").astype(str).str.strip()
-    df["Email"] = df["Email"].fillna("").astype(str).str.strip()
-    df["UG/PG"] = df["UG/PG"].fillna("").astype(str).str.strip().str.upper()
-    df["Batch"] = df["Batch"].map(clean_batch)
-    df["Batch Label"] = df["UG/PG"] + " B" + df["Batch"]
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ]
+    creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
+    return gspread.authorize(creds)
 
+
+def open_master_spreadsheet(client):
+    if "google_sheet_id" in st.secrets:
+        return client.open_by_key(st.secrets["google_sheet_id"])
+    if "GOOGLE_SHEET_ID" in st.secrets:
+        return client.open_by_key(st.secrets["GOOGLE_SHEET_ID"])
+    if "google_sheet_url" in st.secrets:
+        return client.open_by_url(st.secrets["google_sheet_url"])
+    if "GOOGLE_SHEET_URL" in st.secrets:
+        return client.open_by_url(st.secrets["GOOGLE_SHEET_URL"])
+    raise RuntimeError("Provide google_sheet_id or google_sheet_url in Streamlit secrets.")
+
+
+def worksheet_to_dataframe(ws) -> pd.DataFrame:
+    values = ws.get_all_values()
+    if not values:
+        return pd.DataFrame()
+    max_len = max(len(r) for r in values)
+    values = [r + [""] * (max_len - len(r)) for r in values]
+    return pd.DataFrame(values)
+
+
+def parse_master_ug(raw_df: pd.DataFrame) -> pd.DataFrame:
+    header_row_idx = 0
+    headers = raw_df.iloc[header_row_idx].tolist()
+    df = raw_df.iloc[header_row_idx + 3 :].copy().reset_index(drop=True)
+    df.columns = headers
+
+    result = pd.DataFrame()
+    result["Name"] = coalesce_series(df, ["Name"]).astype(str).str.strip()
+    result["Email"] = coalesce_series(df, ["Email"]).astype(str).str.strip()
+    result["UG/PG"] = "UG"
+    result["Batch"] = coalesce_series(df, ["Batch"]).map(clean_batch)
+    result["Country"] = coalesce_series(df, ["Country"]).astype(str).str.strip()
+    result["Status"] = coalesce_series(df, ["Status"]).astype(str).str.strip()
+    result["Payment Status"] = result["Status"].map(payment_status_from_value)
+
+    result = result[(result["Name"] != "") | (result["Email"] != "")].copy()
+    return result
+
+
+def parse_master_pg(raw_df: pd.DataFrame) -> pd.DataFrame:
+    headers = raw_df.iloc[0].tolist()
+    df = raw_df.iloc[3:].copy().reset_index(drop=True)
+    df.columns = headers
+
+    result = pd.DataFrame()
+    result["Name"] = coalesce_series(df, ["Name"]).astype(str).str.strip()
+    result["Email"] = coalesce_series(df, ["Email"]).astype(str).str.strip()
+    result["UG/PG"] = "PG"
+    result["Batch"] = coalesce_series(df, ["Batch"]).map(clean_batch)
+    result["Country"] = coalesce_series(df, ["Country"]).astype(str).str.strip()
+    result["Status"] = coalesce_series(df, ["Status"]).astype(str).str.strip()
+    result["Payment Status"] = result["Status"].map(payment_status_from_value)
+
+    result = result[(result["Name"] != "") | (result["Email"] != "")].copy()
+    return result
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def load_master_students_from_google() -> pd.DataFrame:
+    client = get_gspread_client()
+    sh = open_master_spreadsheet(client)
+
+    ug_raw = worksheet_to_dataframe(sh.worksheet("Master UG"))
+    pg_raw = worksheet_to_dataframe(sh.worksheet("Master PG"))
+
+    ug_df = parse_master_ug(ug_raw)
+    pg_df = parse_master_pg(pg_raw)
+    df = pd.concat([ug_df, pg_df], ignore_index=True)
+
+    df["Batch Label"] = df["UG/PG"].str.upper().str.strip() + " B" + df["Batch"].astype(str).str.strip()
     df["email_key"] = df["Email"].map(normalize_email)
     df["name_key"] = df["Name"].map(normalize_name)
     df["canonical_name_key"] = df["Name"].map(canonical_name_key)
     df["compact_name_key"] = df["Name"].map(compact_name_key)
-
     df = df.drop_duplicates(subset=["email_key", "canonical_name_key", "Batch Label"]).copy()
     return df
 
 
+# -----------------------------
+# Persona + attendance loaders
+# -----------------------------
 def load_personas(persona_file_path: str) -> pd.DataFrame:
     df = pd.read_excel(persona_file_path)
     df.columns = [str(c).strip() for c in df.columns]
@@ -275,15 +321,12 @@ def load_personas(persona_file_path: str) -> pd.DataFrame:
     df["persona_compact_name_key"] = df["Persona Name"].map(compact_name_key)
     df["persona_email_1_key"] = df["Persona Email 1"].map(normalize_email)
     df["persona_email_2_key"] = df["Persona Email 2"].map(normalize_email)
-
     df = df.drop_duplicates(subset=["Student Name", "persona_canonical_name_key", "persona_email_1_key", "persona_email_2_key"]).copy()
     return df
 
 
 @st.cache_data(show_spinner=False)
 def load_attendance(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    from io import BytesIO
-
     df = pd.read_excel(BytesIO(file_bytes))
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -305,12 +348,132 @@ def load_attendance(file_bytes: bytes, filename: str) -> pd.DataFrame:
 
 
 # -----------------------------
-# Matching
+# Matching logic
 # -----------------------------
+def safe_best_name_match(att_row: pd.Series, students_df: pd.DataFrame) -> Optional[pd.Series]:
+    att_name = att_row.get("Attendance Name", "")
+    att_email = normalize_email(att_row.get("Attendance Email", ""))
+    if canonical_name_key(att_name) == "":
+        return None
+    if is_placeholder_attendee(att_name, att_email):
+        return None
+
+    att_canonical = canonical_name_key(att_name)
+    att_tokens = set(tokens_from_name(att_name))
+    att_compact = compact_name_key(att_name)
+
+    exact = students_df[students_df["canonical_name_key"] == att_canonical].copy()
+    if len(exact) == 1:
+        return exact.iloc[0]
+
+    compact = students_df[students_df["compact_name_key"] == att_compact].copy()
+    if len(compact) == 1:
+        return compact.iloc[0]
+
+    candidates = []
+    for _, stu in students_df.iterrows():
+        stu_tokens = set(tokens_from_name(stu.get("Name", "")))
+        stu_canonical = stu.get("canonical_name_key", "")
+        if not stu_tokens or not att_tokens:
+            continue
+        overlap = len(att_tokens & stu_tokens)
+        sim = similarity(att_canonical, stu_canonical)
+        if sim >= 0.92 or (overlap >= max(2, min(len(att_tokens), len(stu_tokens))) and sim >= 0.80):
+            candidates.append((sim, overlap, stu))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    best = candidates[0]
+    if len(candidates) > 1:
+        second = candidates[1]
+        if abs(best[0] - second[0]) < 0.03 and best[1] == second[1]:
+            return None
+    return best[2]
+
+
+def safe_best_persona_match(att_row: pd.Series, personas_df: pd.DataFrame) -> Optional[pd.Series]:
+    att_name = att_row.get("Attendance Name", "")
+    att_email = normalize_email(att_row.get("Attendance Email", ""))
+    if canonical_name_key(att_name) == "" and att_email == "":
+        return None
+    if is_placeholder_attendee(att_name, att_email):
+        return None
+
+    att_canonical = canonical_name_key(att_name)
+    att_compact = compact_name_key(att_name)
+    att_tokens = set(tokens_from_name(att_name))
+
+    def choose_by_persona_name(candidates_df: pd.DataFrame) -> Optional[pd.Series]:
+        if candidates_df.empty:
+            return None
+        exact = candidates_df[candidates_df["persona_canonical_name_key"] == att_canonical].copy()
+        if len(exact) == 1:
+            return exact.iloc[0]
+        compact = candidates_df[candidates_df["persona_compact_name_key"] == att_compact].copy()
+        if len(compact) == 1:
+            return compact.iloc[0]
+
+        prefix_token_hits = []
+        for _, persona in candidates_df.iterrows():
+            persona_canonical = persona.get("persona_canonical_name_key", "")
+            persona_tokens = set(tokens_from_name(persona.get("Persona Name", "")))
+            if not persona_tokens or not att_tokens:
+                continue
+            if persona_canonical and (
+                att_canonical.startswith(persona_canonical + " ")
+                or persona_canonical.startswith(att_canonical + " ")
+                or persona_tokens.issubset(att_tokens)
+                or att_tokens.issubset(persona_tokens)
+            ):
+                prefix_token_hits.append(persona)
+        if len(prefix_token_hits) == 1:
+            return prefix_token_hits[0]
+
+        candidates = []
+        for _, persona in candidates_df.iterrows():
+            persona_tokens = set(tokens_from_name(persona.get("Persona Name", "")))
+            persona_canonical = persona.get("persona_canonical_name_key", "")
+            if not persona_tokens or not att_tokens:
+                continue
+            overlap = len(att_tokens & persona_tokens)
+            sim = similarity(att_canonical, persona_canonical)
+            if sim >= 0.85 or (overlap >= 1 and sim >= 0.60):
+                candidates.append((sim, overlap, persona))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: (x[1], x[0]), reverse=True)
+        best = candidates[0]
+        if len(candidates) > 1:
+            second = candidates[1]
+            if abs(best[0] - second[0]) < 0.03 and best[1] == second[1]:
+                return None
+        return best[2]
+
+    if att_email != "":
+        email_matches = personas_df[(personas_df["persona_email_1_key"] == att_email) | (personas_df["persona_email_2_key"] == att_email)].copy()
+        if len(email_matches) == 1:
+            return email_matches.iloc[0]
+        if len(email_matches) > 1:
+            chosen = choose_by_persona_name(email_matches)
+            if chosen is not None:
+                return chosen
+
+    exact = personas_df[personas_df["persona_canonical_name_key"] == att_canonical].copy()
+    if len(exact) == 1:
+        return exact.iloc[0]
+    compact = personas_df[personas_df["persona_compact_name_key"] == att_compact].copy()
+    if len(compact) == 1:
+        return compact.iloc[0]
+    chosen = choose_by_persona_name(personas_df)
+    if chosen is not None:
+        return chosen
+    return None
+
+
 def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
     attendance = attendance_df.copy().rename(columns={"Name": "Attendance Name", "Email": "Attendance Email"})
     students = students_df.copy()
-
     students_email = students[students["email_key"] != ""].drop_duplicates(subset=["email_key"])
 
     matched_rows = []
@@ -321,7 +484,6 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
         attendance_email = att.get("Attendance Email", "")
         email_key = att.get("email_key", "")
 
-        # Exact student email match must always win, even if the attendance display name is generic.
         email_hit = students_email[students_email["email_key"] == email_key]
         if len(email_hit) >= 1:
             stu = email_hit.iloc[0]
@@ -329,6 +491,8 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
                 "Batch Label": stu["Batch Label"],
                 "UG/PG": stu["UG/PG"],
                 "Batch": stu["Batch"],
+                "Country": stu["Country"],
+                "Payment Status": stu["Payment Status"],
                 "Student Name": stu["Name"],
                 "Student Email": stu["Email"],
                 "Attendance Name": attendance_name,
@@ -337,7 +501,6 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
             })
             continue
 
-        # Only treat placeholders as unmatched after exact email matching has failed.
         if is_placeholder_attendee(attendance_name, attendance_email):
             unmatched_rows.append({
                 "Attendance Name": attendance_name,
@@ -355,6 +518,8 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
                 "Batch Label": stu["Batch Label"],
                 "UG/PG": stu["UG/PG"],
                 "Batch": stu["Batch"],
+                "Country": stu["Country"],
+                "Payment Status": stu["Payment Status"],
                 "Student Name": stu["Name"],
                 "Student Email": stu["Email"],
                 "Attendance Name": attendance_name,
@@ -373,10 +538,7 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
     unmatched = pd.DataFrame(unmatched_rows)
 
     if matched.empty:
-        matched = pd.DataFrame(columns=[
-            "Batch Label", "UG/PG", "Batch", "Student Name", "Student Email",
-            "Attendance Name", "Attendance Email", "match_type"
-        ])
+        matched = pd.DataFrame(columns=["Batch Label", "UG/PG", "Batch", "Country", "Payment Status", "Student Name", "Student Email", "Attendance Name", "Attendance Email", "match_type"])
     else:
         matched["dedupe_key"] = matched["Student Email"].map(normalize_email)
         blank_mask = matched["dedupe_key"] == ""
@@ -392,165 +554,8 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
     return matched, unmatched
 
 
-def safe_best_persona_match(att_row: pd.Series, personas_df: pd.DataFrame) -> Optional[pd.Series]:
-    att_name = att_row.get("Attendance Name", "")
-    att_email = normalize_email(att_row.get("Attendance Email", ""))
-    if canonical_name_key(att_name) == "" and att_email == "":
-        return None
-    if is_placeholder_attendee(att_name, att_email):
-        return None
-
-    att_canonical = canonical_name_key(att_name)
-    att_compact = compact_name_key(att_name)
-    att_tokens = set(tokens_from_name(att_name))
-
-    def choose_by_persona_name(candidates_df: pd.DataFrame) -> Optional[pd.Series]:
-        if candidates_df.empty:
-            return None
-
-        exact = candidates_df[candidates_df["persona_canonical_name_key"] == att_canonical].copy()
-        if len(exact) == 1:
-            return exact.iloc[0]
-
-        compact = candidates_df[candidates_df["persona_compact_name_key"] == att_compact].copy()
-        if len(compact) == 1:
-            return compact.iloc[0]
-
-        prefix_token_hits = []
-        for _, persona in candidates_df.iterrows():
-            persona_canonical = persona.get("persona_canonical_name_key", "")
-            persona_tokens = set(tokens_from_name(persona.get("Persona Name", "")))
-            if not persona_tokens or not att_tokens:
-                continue
-            if persona_canonical and (
-                att_canonical.startswith(persona_canonical + " ")
-                or persona_canonical.startswith(att_canonical + " ")
-                or persona_tokens.issubset(att_tokens)
-                or att_tokens.issubset(persona_tokens)
-            ):
-                prefix_token_hits.append(persona)
-
-        if len(prefix_token_hits) == 1:
-            return prefix_token_hits[0]
-
-        candidates = []
-        for _, persona in candidates_df.iterrows():
-            persona_name = persona.get("Persona Name", "")
-            persona_tokens = set(tokens_from_name(persona_name))
-            persona_canonical = persona.get("persona_canonical_name_key", "")
-            if not persona_tokens or not att_tokens:
-                continue
-            overlap = len(att_tokens & persona_tokens)
-            sim = similarity(att_canonical, persona_canonical)
-            if sim >= 0.85 or (overlap >= 1 and sim >= 0.60):
-                candidates.append((sim, overlap, persona))
-
-        if not candidates:
-            return None
-
-        candidates.sort(key=lambda x: (x[1], x[0]), reverse=True)
-        best = candidates[0]
-        if len(candidates) > 1:
-            second = candidates[1]
-            if abs(best[0] - second[0]) < 0.03 and best[1] == second[1]:
-                return None
-        return best[2]
-
-    if att_email != "":
-        email_matches = personas_df[
-            (personas_df["persona_email_1_key"] == att_email) |
-            (personas_df["persona_email_2_key"] == att_email)
-        ].copy()
-        if len(email_matches) == 1:
-            return email_matches.iloc[0]
-        if len(email_matches) > 1:
-            chosen = choose_by_persona_name(email_matches)
-            if chosen is not None:
-                return chosen
-
-    exact = personas_df[personas_df["persona_canonical_name_key"] == att_canonical].copy()
-    if len(exact) == 1:
-        return exact.iloc[0]
-
-    compact = personas_df[personas_df["persona_compact_name_key"] == att_compact].copy()
-    if len(compact) == 1:
-        return compact.iloc[0]
-
-    chosen = choose_by_persona_name(personas_df)
-    if chosen is not None:
-        return chosen
-
-    return None
-    if is_placeholder_attendee(att_name, att_email):
-        return None
-
-    att_canonical = canonical_name_key(att_name)
-    att_compact = compact_name_key(att_name)
-    att_tokens = set(tokens_from_name(att_name))
-
-    def choose_by_persona_name(candidates_df: pd.DataFrame) -> Optional[pd.Series]:
-        if candidates_df.empty:
-            return None
-        exact = candidates_df[candidates_df["persona_canonical_name_key"] == att_canonical].copy()
-        if len(exact) == 1:
-            return exact.iloc[0]
-
-        compact = candidates_df[candidates_df["persona_compact_name_key"] == att_compact].copy()
-        if len(compact) == 1:
-            return compact.iloc[0]
-
-        candidates = []
-        for _, persona in candidates_df.iterrows():
-            persona_name = persona.get("Persona Name", "")
-            persona_tokens = set(tokens_from_name(persona_name))
-            persona_canonical = persona.get("persona_canonical_name_key", "")
-            if not persona_tokens or not att_tokens:
-                continue
-            overlap = len(att_tokens & persona_tokens)
-            sim = similarity(att_canonical, persona_canonical)
-            if sim >= 0.90 or (overlap >= max(1, min(len(att_tokens), len(persona_tokens))) and sim >= 0.75):
-                candidates.append((sim, overlap, persona))
-
-        if not candidates:
-            return None
-        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        best = candidates[0]
-        if len(candidates) > 1:
-            second = candidates[1]
-            if abs(best[0] - second[0]) < 0.03 and best[1] == second[1]:
-                return None
-        return best[2]
-
-    if att_email != "":
-        email_matches = personas_df[
-            (personas_df["persona_email_1_key"] == att_email) |
-            (personas_df["persona_email_2_key"] == att_email)
-        ].copy()
-        if len(email_matches) == 1:
-            return email_matches.iloc[0]
-        if len(email_matches) > 1:
-            chosen = choose_by_persona_name(email_matches)
-            if chosen is not None:
-                return chosen
-
-    exact = personas_df[personas_df["persona_canonical_name_key"] == att_canonical].copy()
-    if len(exact) == 1:
-        return exact.iloc[0]
-
-    compact = personas_df[personas_df["persona_compact_name_key"] == att_compact].copy()
-    if len(compact) == 1:
-        return compact.iloc[0]
-
-    chosen = choose_by_persona_name(personas_df)
-    if chosen is not None:
-        return chosen
-
-    return None
-
-
 def match_personas(attendance_df: pd.DataFrame, personas_df: pd.DataFrame):
     attendance = attendance_df.copy().rename(columns={"Name": "Attendance Name", "Email": "Attendance Email"})
-
     matched_rows = []
     unmatched_rows = []
 
@@ -558,15 +563,11 @@ def match_personas(attendance_df: pd.DataFrame, personas_df: pd.DataFrame):
         attendance_name = att.get("Attendance Name", "")
         attendance_email = att.get("Attendance Email", "")
 
-        # Let persona matching run first, even if the visible name is generic like Zoom/Utente.
         persona = safe_best_persona_match(att, personas_df)
         if persona is not None:
             matched_by = "Persona Name"
             att_email_key = normalize_email(attendance_email)
-            if att_email_key != "" and (
-                att_email_key == normalize_email(persona.get("Persona Email 1", "")) or
-                att_email_key == normalize_email(persona.get("Persona Email 2", ""))
-            ):
+            if att_email_key != "" and (att_email_key == normalize_email(persona.get("Persona Email 1", "")) or att_email_key == normalize_email(persona.get("Persona Email 2", ""))):
                 matched_by = "Persona Email"
             matched_rows.append({
                 "Persona Name": persona.get("Persona Name", ""),
@@ -594,10 +595,7 @@ def match_personas(attendance_df: pd.DataFrame, personas_df: pd.DataFrame):
     unmatched = pd.DataFrame(unmatched_rows)
 
     if matched.empty:
-        matched = pd.DataFrame(columns=[
-            "Persona Name", "Student Name", "Persona Email 1", "Persona Email 2", "Phone",
-            "UG/PG", "Attendance Name", "Attendance Email", "Matched By"
-        ])
+        matched = pd.DataFrame(columns=["Persona Name", "Student Name", "Persona Email 1", "Persona Email 2", "Phone", "UG/PG", "Attendance Name", "Attendance Email", "Matched By"])
     else:
         matched["dedupe_key"] = matched["Persona Email 1"].map(normalize_email)
         no_primary = matched["dedupe_key"] == ""
@@ -617,27 +615,16 @@ def match_personas(attendance_df: pd.DataFrame, personas_df: pd.DataFrame):
 
 def build_final_unmatched(attendance_df: pd.DataFrame, matched_students: pd.DataFrame, matched_personas: pd.DataFrame) -> pd.DataFrame:
     attendance = attendance_df.copy().rename(columns={"Name": "Attendance Name", "Email": "Attendance Email"})
-    attendance["row_key"] = attendance.apply(
-        lambda r: f"{canonical_name_key(r.get('Attendance Name', ''))}||{normalize_email(r.get('Attendance Email', ''))}",
-        axis=1,
-    )
+    attendance["row_key"] = attendance.apply(lambda r: f"{canonical_name_key(r.get('Attendance Name', ''))}||{normalize_email(r.get('Attendance Email', ''))}", axis=1)
 
     matched_keys = set()
-
     if not matched_students.empty:
         ms = matched_students.copy()
-        ms["row_key"] = ms.apply(
-            lambda r: f"{canonical_name_key(r.get('Attendance Name', ''))}||{normalize_email(r.get('Attendance Email', ''))}",
-            axis=1,
-        )
+        ms["row_key"] = ms.apply(lambda r: f"{canonical_name_key(r.get('Attendance Name', ''))}||{normalize_email(r.get('Attendance Email', ''))}", axis=1)
         matched_keys.update(ms["row_key"].tolist())
-
     if not matched_personas.empty:
         mp = matched_personas.copy()
-        mp["row_key"] = mp.apply(
-            lambda r: f"{canonical_name_key(r.get('Attendance Name', ''))}||{normalize_email(r.get('Attendance Email', ''))}",
-            axis=1,
-        )
+        mp["row_key"] = mp.apply(lambda r: f"{canonical_name_key(r.get('Attendance Name', ''))}||{normalize_email(r.get('Attendance Email', ''))}", axis=1)
         matched_keys.update(mp["row_key"].tolist())
 
     final_unmatched = attendance[~attendance["row_key"].isin(matched_keys)].copy()
@@ -647,50 +634,77 @@ def build_final_unmatched(attendance_df: pd.DataFrame, matched_students: pd.Data
 
 
 # -----------------------------
+# Analytics sections
+# -----------------------------
+def render_country_round_plot(country_df: pd.DataFrame):
+    if country_df.empty:
+        st.info("No country data available for the matched attendees.")
+        return
+
+    chart_df = round_bar_chart_input(country_df, "Country", "Attendee Count", top_n=12)
+    if chart_df.empty:
+        st.info("No country data available for the matched attendees.")
+        return
+
+    import plotly.graph_objects as go
+
+    fig = go.Figure(
+        data=[
+            go.Barpolar(
+                r=chart_df["Attendee Count"],
+                theta=chart_df["Country"],
+                text=chart_df["Attendee Count"],
+                textposition="inside",
+                marker_line_color="white",
+                marker_line_width=1,
+                opacity=0.9,
+            )
+        ]
+    )
+    fig.update_layout(
+        height=520,
+        polar=dict(radialaxis=dict(showticklabels=True, ticks="")),
+        margin=dict(l=30, r=30, t=30, b=30),
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# -----------------------------
 # App UI
 # -----------------------------
 st.markdown(
     """
     <div class="hero-card">
         <div class="hero-title">Batch Attendance Mapper</div>
-        <div class="hero-subtitle">Upload an attendance sheet and instantly see attendees distributed into their batches with improved matching accuracy.</div>
+        <div class="hero-subtitle">Upload an attendance sheet and see student, persona, batch, paid/unpaid, and country-level attendance insights from the live Google Sheet.</div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-STUDENTS_FILE = "Students.xlsx"
 PERSONA_FILE = "Persona Records.xlsx"
 
-if not Path(STUDENTS_FILE).exists():
-    st.error("Students.xlsx was not found. Put Students.xlsx in the same folder as app.py.")
-    st.stop()
-
-# Important: no cache here, so new students added to Students.xlsx load immediately on refresh/redeploy
 try:
-    students_df = load_students(STUDENTS_FILE)
-    student_file_mtime = Path(STUDENTS_FILE).stat().st_mtime
+    students_df = load_master_students_from_google()
 except Exception as e:
-    st.error(f"Could not load Students.xlsx: {e}")
+    st.error(f"Could not load Master UG / Master PG from Google Sheets: {e}")
     st.stop()
 
 persona_df = pd.DataFrame()
 persona_file_available = Path(PERSONA_FILE).exists()
-persona_file_mtime = None
 if persona_file_available:
     try:
         persona_df = load_personas(PERSONA_FILE)
-        persona_file_mtime = Path(PERSONA_FILE).stat().st_mtime
     except Exception as e:
         st.warning(f"Could not load Persona Records.xlsx: {e}")
         persona_df = pd.DataFrame()
         persona_file_available = False
 
-with st.expander("Preview Students.xlsx", expanded=False):
-    st.caption(f"Loaded rows: {len(students_df)}")
-    st.caption(f"Last updated timestamp: {student_file_mtime}")
+with st.expander("Preview live student master data", expanded=False):
+    st.caption(f"Loaded rows from Google Sheet: {len(students_df)}")
     st.dataframe(
-        students_df[["Name", "Email", "UG/PG", "Batch", "Batch Label"]],
+        students_df[["Name", "Email", "UG/PG", "Batch", "Country", "Status", "Payment Status", "Batch Label"]],
         use_container_width=True,
         height=280,
     )
@@ -698,7 +712,6 @@ with st.expander("Preview Students.xlsx", expanded=False):
 if persona_file_available:
     with st.expander("Preview Persona Records.xlsx", expanded=False):
         st.caption(f"Loaded persona rows: {len(persona_df)}")
-        st.caption(f"Last updated timestamp: {persona_file_mtime}")
         st.dataframe(
             persona_df[["Student Name", "Persona Name", "Persona Email 1", "Persona Email 2", "Phone", "UG/PG"]],
             use_container_width=True,
@@ -715,10 +728,11 @@ try:
     attendance_bytes = uploaded_file.getvalue()
     attendance_df = load_attendance(attendance_bytes, uploaded_file.name)
     event_name, event_date = parse_event_details(uploaded_file.name)
+
     matched_students, unmatched_students = match_attendees(attendance_df, students_df)
     matched_personas, unmatched_personas = match_personas(attendance_df, persona_df) if persona_file_available and not persona_df.empty else (
         pd.DataFrame(columns=["Persona Name", "Student Name", "Persona Email 1", "Persona Email 2", "Phone", "UG/PG", "Attendance Name", "Attendance Email", "Matched By"]),
-        pd.DataFrame(columns=["Attendance Name", "Attendance Email", "Reason"])
+        pd.DataFrame(columns=["Attendance Name", "Attendance Email", "Reason"]),
     )
     final_unmatched = build_final_unmatched(attendance_df, matched_students, matched_personas)
 
@@ -739,29 +753,55 @@ try:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("UG / PG Distribution")
+    if matched_students.empty:
+        ugpg_summary = pd.DataFrame(columns=["UG/PG", "Attendee Count"])
+        st.info("No matched students found for UG / PG distribution.")
+    else:
+        ugpg_summary = matched_students.groupby("UG/PG", dropna=False).size().reset_index(name="Attendee Count").sort_values("UG/PG")
+        st.dataframe(ugpg_summary, use_container_width=True, height=160)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Batch Attendees Count")
     if matched_students.empty:
-        st.warning("No attendees matched with Students.xlsx.")
         batch_summary = pd.DataFrame(columns=["Batch Label", "Attendee Count"])
+        st.warning("No attendees matched with the Google Sheet master data.")
     else:
-        batch_summary = (
-            matched_students.groupby("Batch Label", dropna=False)
-            .size()
-            .reset_index(name="Attendee Count")
-            .sort_values("Batch Label")
-        )
+        batch_summary = matched_students.groupby("Batch Label", dropna=False).size().reset_index(name="Attendee Count").sort_values("Batch Label")
         st.dataframe(batch_summary, use_container_width=True, height=260)
     st.markdown('</div>', unsafe_allow_html=True)
 
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Paid vs Unpaid Students Attended")
+    if matched_students.empty:
+        paid_summary = pd.DataFrame(columns=["Payment Status", "Attendee Count"])
+        st.info("No matched students found for paid/unpaid analysis.")
+    else:
+        paid_summary = matched_students.groupby("Payment Status", dropna=False).size().reset_index(name="Attendee Count").sort_values("Payment Status")
+        st.dataframe(paid_summary, use_container_width=True, height=160)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Country-wise Students Attended")
+    if matched_students.empty:
+        country_summary = pd.DataFrame(columns=["Country", "Attendee Count"])
+        st.info("No matched students found for country analysis.")
+    else:
+        country_summary = matched_students.groupby("Country", dropna=False).size().reset_index(name="Attendee Count")
+        country_summary["Country"] = country_summary["Country"].replace({"": "Unknown", "nan": "Unknown"})
+        country_summary = country_summary.sort_values("Attendee Count", ascending=False)
+        render_country_round_plot(country_summary)
+        st.dataframe(country_summary, use_container_width=True, height=260)
+    st.markdown('</div>', unsafe_allow_html=True)
+
     if not matched_students.empty:
-        st.subheader("Batch-wise Name and Email List")
+        st.subheader("Batch-wise Name, Email, Country and Payment Status")
         for _, row in batch_summary.iterrows():
             batch_label = row["Batch Label"]
             count = row["Attendee Count"]
             batch_df = matched_students[matched_students["Batch Label"] == batch_label].copy()
-            batch_df = batch_df[["Student Name", "Student Email", "Attendance Name", "Attendance Email", "match_type"]].rename(
-                columns={"match_type": "Matched By"}
-            )
+            batch_df = batch_df[["Student Name", "Student Email", "Country", "Payment Status", "Attendance Name", "Attendance Email", "match_type"]].rename(columns={"match_type": "Matched By"})
 
             st.markdown(
                 f"""
@@ -772,7 +812,7 @@ try:
                 """,
                 unsafe_allow_html=True,
             )
-            st.dataframe(batch_df, use_container_width=True, height=min(360, 70 + len(batch_df) * 35))
+            st.dataframe(batch_df, use_container_width=True, height=min(380, 70 + len(batch_df) * 35))
 
     if persona_file_available and not persona_df.empty:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -780,12 +820,7 @@ try:
         if matched_personas.empty:
             st.info("No persona attendees matched from Persona Records.xlsx.")
         else:
-            persona_summary = (
-                matched_personas.groupby(["UG/PG"], dropna=False)
-                .size()
-                .reset_index(name="Persona Attendee Count")
-                .sort_values("UG/PG")
-            )
+            persona_summary = matched_personas.groupby(["UG/PG"], dropna=False).size().reset_index(name="Persona Attendee Count").sort_values("UG/PG")
             st.dataframe(persona_summary, use_container_width=True, height=180)
             st.dataframe(matched_personas, use_container_width=True, height=min(420, 70 + len(matched_personas) * 35))
         st.markdown('</div>', unsafe_allow_html=True)
@@ -794,7 +829,10 @@ try:
     st.subheader("Download Output")
     output_path = Path("batch_attendance_output.xlsx")
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        ugpg_summary.to_excel(writer, sheet_name="UG PG Distribution", index=False)
         batch_summary.to_excel(writer, sheet_name="Batch Summary", index=False)
+        paid_summary.to_excel(writer, sheet_name="Paid Unpaid Summary", index=False)
+        country_summary.to_excel(writer, sheet_name="Country Summary", index=False)
         matched_students.to_excel(writer, sheet_name="Matched Students", index=False)
         unmatched_students.to_excel(writer, sheet_name="Student Unmatched Debug", index=False)
         final_unmatched.to_excel(writer, sheet_name="Unmatched Students", index=False)
