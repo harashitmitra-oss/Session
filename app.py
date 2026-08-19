@@ -269,6 +269,36 @@ def parse_master_pg(raw_df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def parse_master_gap_year(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Parse the Master Gap Year worksheet.
+
+    Gap Year differs from UG/PG:
+    - headers are on the first row and data starts immediately on row 2
+    - payment state lives in Deposit Pipeline Status
+    - only Deposit Pipeline Status == Paid is treated as Paid
+    - the source Status exposed in attendance detail is Deposit Pipeline Status
+    """
+    headers = [str(h).strip() for h in raw_df.iloc[0].tolist()]
+    df = raw_df.iloc[1:].copy().reset_index(drop=True)
+    df.columns = headers
+
+    result = pd.DataFrame()
+    result["Name"] = coalesce_series(df, ["Name"]).astype(str).str.strip()
+    result["Email"] = coalesce_series(df, ["Email"]).astype(str).str.strip()
+    result["UG/PG"] = "Gap Year"
+    result["Batch"] = coalesce_series(df, ["Batch"]).map(clean_batch)
+    result["Country"] = coalesce_series(df, ["Country"]).astype(str).str.strip()
+
+    deposit_status = coalesce_series(df, ["Deposit Pipeline Status"]).astype(str).str.strip()
+    result["Status"] = deposit_status
+    result["Payment Status"] = deposit_status.map(
+        lambda value: "Paid" if normalize_text(value) == "paid" else "Unpaid"
+    )
+
+    result = result[(result["Name"] != "") | (result["Email"] != "")].copy()
+    return result
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def load_master_students_from_google() -> pd.DataFrame:
     client = get_gspread_client()
@@ -276,12 +306,15 @@ def load_master_students_from_google() -> pd.DataFrame:
 
     ug_raw = worksheet_to_dataframe(sh.worksheet("Master UG"))
     pg_raw = worksheet_to_dataframe(sh.worksheet("Master PG"))
+    gap_year_raw = worksheet_to_dataframe(sh.worksheet("Master Gap Year"))
 
     ug_df = parse_master_ug(ug_raw)
     pg_df = parse_master_pg(pg_raw)
-    df = pd.concat([ug_df, pg_df], ignore_index=True)
+    gap_year_df = parse_master_gap_year(gap_year_raw)
+    df = pd.concat([ug_df, pg_df, gap_year_df], ignore_index=True)
 
-    df["Batch Label"] = df["UG/PG"].str.upper().str.strip() + " B" + df["Batch"].astype(str).str.strip()
+    program_label = df["UG/PG"].map(lambda x: "Gap Year" if normalize_text(x) == "gap year" else str(x).upper().strip())
+    df["Batch Label"] = program_label + " B" + df["Batch"].astype(str).str.strip()
     df["email_key"] = df["Email"].map(normalize_email)
     df["name_key"] = df["Name"].map(normalize_name)
     df["canonical_name_key"] = df["Name"].map(canonical_name_key)
@@ -369,10 +402,18 @@ def safe_best_name_match(att_row: pd.Series, students_df: pd.DataFrame) -> Optio
     exact = students_df[students_df["canonical_name_key"] == att_canonical].copy()
     if len(exact) == 1:
         return exact.iloc[0]
+    if len(exact) > 1:
+        exact_emails = [e for e in exact["email_key"].dropna().unique().tolist() if e]
+        if len(exact_emails) == 1:
+            return exact.iloc[0]
 
     compact = students_df[students_df["compact_name_key"] == att_compact].copy()
     if len(compact) == 1:
         return compact.iloc[0]
+    if len(compact) > 1:
+        compact_emails = [e for e in compact["email_key"].dropna().unique().tolist() if e]
+        if len(compact_emails) == 1:
+            return compact.iloc[0]
 
     candidates = []
     for _, stu in students_df.iterrows():
@@ -478,32 +519,46 @@ def safe_best_persona_match(att_row: pd.Series, personas_df: pd.DataFrame) -> Op
 def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
     attendance = attendance_df.copy().rename(columns={"Name": "Attendance Name", "Email": "Attendance Email"})
     students = students_df.copy()
-    students_email = students[students["email_key"] != ""].drop_duplicates(subset=["email_key"])
+    students_email = students[students["email_key"] != ""].copy()
 
     matched_rows = []
     unmatched_rows = []
+
+    def append_student_record(stu, attendance_name, attendance_email, match_type):
+        matched_rows.append({
+            "Batch Label": stu["Batch Label"],
+            "UG/PG": stu["UG/PG"],
+            "Batch": stu["Batch"],
+            "Country": stu["Country"],
+            "Status": stu["Status"],
+            "Payment Status": stu["Payment Status"],
+            "Student Name": stu["Name"],
+            "Student Email": stu["Email"],
+            "Attendance Name": attendance_name,
+            "Attendance Email": attendance_email,
+            "match_type": match_type,
+        })
+
+    def expand_program_records(stu):
+        student_email = normalize_email(stu.get("Email", ""))
+        if student_email:
+            hits = students[students["email_key"] == student_email].copy()
+        else:
+            hits = students[students["canonical_name_key"] == canonical_name_key(stu.get("Name", ""))].copy()
+        return hits.drop_duplicates(subset=["UG/PG", "Batch Label", "email_key", "canonical_name_key"])
 
     for _, att in attendance.iterrows():
         attendance_name = att.get("Attendance Name", "")
         attendance_email = att.get("Attendance Email", "")
         email_key = att.get("email_key", "")
 
-        email_hit = students_email[students_email["email_key"] == email_key]
+        # Exact email remains definitive. If that same student exists in more than one
+        # program (for example UG and Gap Year), retain every program record.
+        email_hit = students_email[students_email["email_key"] == email_key].copy()
         if len(email_hit) >= 1:
-            stu = email_hit.iloc[0]
-            matched_rows.append({
-                "Batch Label": stu["Batch Label"],
-                "UG/PG": stu["UG/PG"],
-                "Batch": stu["Batch"],
-                "Country": stu["Country"],
-                "Status": stu["Status"],
-                "Payment Status": stu["Payment Status"],
-                "Student Name": stu["Name"],
-                "Student Email": stu["Email"],
-                "Attendance Name": attendance_name,
-                "Attendance Email": attendance_email,
-                "match_type": "Email",
-            })
+            email_hit = email_hit.drop_duplicates(subset=["UG/PG", "Batch Label", "email_key", "canonical_name_key"])
+            for _, stu in email_hit.iterrows():
+                append_student_record(stu, attendance_name, attendance_email, "Email")
             continue
 
         if is_placeholder_attendee(attendance_name, attendance_email):
@@ -519,19 +574,12 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
             match_type = "Name"
             if normalize_email(attendance_email) != "" and normalize_email(attendance_email) != normalize_email(stu["Email"]):
                 match_type = "Name (email differs)"
-            matched_rows.append({
-                "Batch Label": stu["Batch Label"],
-                "UG/PG": stu["UG/PG"],
-                "Batch": stu["Batch"],
-                "Country": stu["Country"],
-                "Status": stu["Status"],
-                "Payment Status": stu["Payment Status"],
-                "Student Name": stu["Name"],
-                "Student Email": stu["Email"],
-                "Attendance Name": attendance_name,
-                "Attendance Email": attendance_email,
-                "match_type": match_type,
-            })
+
+            # Once a safe identity is established by name, include every program record
+            # belonging to that same student so overlaps are counted in each program.
+            program_records = expand_program_records(stu)
+            for _, program_stu in program_records.iterrows():
+                append_student_record(program_stu, attendance_name, attendance_email, match_type)
             continue
 
         unmatched_rows.append({
@@ -549,8 +597,9 @@ def match_attendees(attendance_df: pd.DataFrame, students_df: pd.DataFrame):
         matched["dedupe_key"] = matched["Student Email"].map(normalize_email)
         blank_mask = matched["dedupe_key"] == ""
         matched.loc[blank_mask, "dedupe_key"] = matched.loc[blank_mask, "Student Name"].map(canonical_name_key)
-        matched = matched.drop_duplicates(subset=["Batch Label", "dedupe_key"]).copy()
-        matched = matched.sort_values(by=["Batch Label", "Student Name"], ascending=[True, True])
+        # Dedupe only within the same program/batch. Cross-program overlaps are intentionally kept.
+        matched = matched.drop_duplicates(subset=["UG/PG", "Batch Label", "dedupe_key"]).copy()
+        matched = matched.sort_values(by=["UG/PG", "Batch Label", "Student Name"], ascending=[True, True, True])
 
     if unmatched.empty:
         unmatched = pd.DataFrame(columns=["Attendance Name", "Attendance Email", "Reason"])
@@ -717,7 +766,7 @@ st.markdown(
     """
     <div class="hero-card">
         <div class="hero-title">Batch Attendance Mapper</div>
-        <div class="hero-subtitle">Upload an Attendance sheet and see Student, Persona, Batch, Paid/Unpaid, and Country-level Attendance Insights.</div>
+        <div class="hero-subtitle">Upload an Attendance sheet and see UG, PG, Gap Year, Persona, Batch, Paid/Unpaid, and Country-level Attendance Insights.</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -728,7 +777,7 @@ PERSONA_FILE = "Persona Records.xlsx"
 try:
     students_df = load_master_students_from_google()
 except Exception as e:
-    st.error(f"Could not load Master UG / Master PG from Google Sheets: {e}")
+    st.error(f"Could not load Master UG / Master PG / Master Gap Year from Google Sheets: {e}")
     st.stop()
 
 persona_df = pd.DataFrame()
@@ -792,8 +841,40 @@ try:
         c6.metric("Matched Personas", len(matched_personas))
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # Top program attendance matrix. A student enrolled in multiple programs is intentionally
+    # represented in each applicable program row.
     if matched_students.empty:
-        ugpg_summary = pd.DataFrame(columns=["UG/PG", "Attendee Count"])
+        program_matrix = pd.DataFrame(columns=["Program", "Matched / Attended", "Paid", "Unpaid", "Paid %", "Unpaid %"])
+    else:
+        program_matrix = (
+            matched_students.groupby("UG/PG", dropna=False)
+            .agg(
+                **{
+                    "Matched / Attended": ("Student Name", "size"),
+                    "Paid": ("Payment Status", lambda s: (s == "Paid").sum()),
+                    "Unpaid": ("Payment Status", lambda s: (s == "Unpaid").sum()),
+                }
+            )
+            .reset_index()
+            .rename(columns={"UG/PG": "Program"})
+        )
+        desired_order = {"UG": 0, "PG": 1, "Gap Year": 2}
+        program_matrix["_order"] = program_matrix["Program"].map(desired_order).fillna(99)
+        program_matrix = program_matrix.sort_values(["_order", "Program"]).drop(columns=["_order"])
+        program_matrix["Paid %"] = (program_matrix["Paid"] / program_matrix["Matched / Attended"] * 100).fillna(0).round(1)
+        program_matrix["Unpaid %"] = (program_matrix["Unpaid"] / program_matrix["Matched / Attended"] * 100).fillna(0).round(1)
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Program Attendance Matrix")
+    st.caption("Students present in more than one program are counted in each applicable program, as requested.")
+    if program_matrix.empty:
+        st.info("No matched students found for the program matrix.")
+    else:
+        st.dataframe(program_matrix, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if matched_students.empty:
+        ugpg_summary = pd.DataFrame(columns=["UG/PG", "Attendee Count", "Paid Count", "Unpaid Count", "Paid %", "Unpaid %", "Program %", "Display Text"])
         batch_summary = pd.DataFrame(columns=["Batch Label", "Attendee Count"])
         paid_summary = pd.DataFrame(columns=["Payment Status", "Attendee Count"])
         country_summary = pd.DataFrame(columns=["Country", "Attendee Count"])
@@ -812,9 +893,9 @@ try:
         )
         ugpg_summary["Paid %"] = (ugpg_summary["Paid Count"] / ugpg_summary["Attendee Count"] * 100).fillna(0).round(1)
         ugpg_summary["Unpaid %"] = (ugpg_summary["Unpaid Count"] / ugpg_summary["Attendee Count"] * 100).fillna(0).round(1)
-        ugpg_summary["UG/PG %"] = (ugpg_summary["Attendee Count"] / ugpg_summary["Attendee Count"].sum() * 100).fillna(0).round(1)
+        ugpg_summary["Program %"] = (ugpg_summary["Attendee Count"] / ugpg_summary["Attendee Count"].sum() * 100).fillna(0).round(1)
         ugpg_summary["Display Text"] = ugpg_summary.apply(
-            lambda r: f"{r['UG/PG']} ({r['UG/PG %']:.1f}%)<br>Total: {int(r['Attendee Count'])}<br>Paid: {int(r['Paid Count'])} ({r['Paid %']:.1f}%)<br>Unpaid: {int(r['Unpaid Count'])} ({r['Unpaid %']:.1f}%)",
+            lambda r: f"{r['UG/PG']} ({r['Program %']:.1f}%)<br>Total: {int(r['Attendee Count'])}<br>Paid: {int(r['Paid Count'])} ({r['Paid %']:.1f}%)<br>Unpaid: {int(r['Unpaid Count'])} ({r['Unpaid %']:.1f}%)",
             axis=1,
         )
         batch_summary = (
@@ -840,7 +921,7 @@ try:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     chart_row_1_col_1, chart_row_1_col_2 = st.columns(2)
     with chart_row_1_col_1:
-        render_donut_chart(ugpg_summary, "UG/PG", "Attendee Count", "UG / PG Distribution", custom_text_col="Display Text")
+        render_donut_chart(ugpg_summary, "UG/PG", "Attendee Count", "UG / PG / Gap Year Distribution", custom_text_col="Display Text")
     with chart_row_1_col_2:
         render_donut_chart(batch_summary.head(10), "Batch Label", "Attendee Count", "Batch Attendees Count")
 
@@ -854,11 +935,11 @@ try:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     table_row_1_col_1, table_row_1_col_2 = st.columns(2)
     with table_row_1_col_1:
-        st.subheader("UG / PG Distribution")
+        st.subheader("UG / PG / Gap Year Distribution")
         if ugpg_summary.empty:
-            st.info("No matched students found for UG / PG distribution.")
+            st.info("No matched students found for UG / PG / Gap Year distribution.")
         else:
-            st.dataframe(ugpg_summary[["UG/PG", "Attendee Count", "UG/PG %", "Paid Count", "Paid %", "Unpaid Count", "Unpaid %"]], use_container_width=True)
+            st.dataframe(ugpg_summary[["UG/PG", "Attendee Count", "Program %", "Paid Count", "Paid %", "Unpaid Count", "Unpaid %"]], use_container_width=True)
     with table_row_1_col_2:
         st.subheader("Paid vs Unpaid Students Attended")
         if paid_summary.empty:
@@ -882,6 +963,24 @@ try:
     st.markdown('</div>', unsafe_allow_html=True)
 
     if not matched_students.empty:
+        overlap_work = matched_students.copy()
+        overlap_work["student_identity"] = overlap_work["Student Email"].map(normalize_email)
+        blank_identity = overlap_work["student_identity"] == ""
+        overlap_work.loc[blank_identity, "student_identity"] = overlap_work.loc[blank_identity, "Student Name"].map(canonical_name_key)
+        overlap_counts = overlap_work.groupby("student_identity")["UG/PG"].nunique()
+        overlap_ids = overlap_counts[overlap_counts > 1].index.tolist()
+
+        if overlap_ids:
+            overlap_details = overlap_work[overlap_work["student_identity"].isin(overlap_ids)][
+                ["Student Name", "Student Email", "UG/PG", "Batch Label", "Payment Status", "Status", "Country"]
+            ].copy()
+            overlap_details = overlap_details.sort_values(["Student Name", "UG/PG", "Batch Label"])
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Students Attending Across Multiple Programs")
+            st.caption("These attendees are shown and counted separately in each program/batch below.")
+            st.dataframe(overlap_details, use_container_width=True, height=min(900, 80 + len(overlap_details) * 35))
+            st.markdown('</div>', unsafe_allow_html=True)
+
         st.subheader("Batch-wise Name, Email, Country and Payment Status")
         for _, row in batch_summary.iterrows():
             batch_label = row["Batch Label"]
@@ -962,6 +1061,7 @@ try:
     st.subheader("Download Output")
     output_path = Path("batch_attendance_output.xlsx")
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        program_matrix.to_excel(writer, sheet_name="Program Matrix", index=False)
         ugpg_summary.to_excel(writer, sheet_name="UG PG Distribution", index=False)
         batch_summary.to_excel(writer, sheet_name="Batch Summary", index=False)
         paid_summary.to_excel(writer, sheet_name="Paid Unpaid Summary", index=False)
